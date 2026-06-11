@@ -11,6 +11,11 @@ import TechnicalFeature from './features/technical/index'
 import FundamentalFeature from './features/fundamental/index'
 import InsiderFeature from './features/insider/index'
 import AIAgentFeature from './features/ai_agent/index'
+import CongressFeature from './features/congress/index'
+import MarketIntelFeature from './features/market_intel/index'
+import InstitutionalFeature from './features/institutional/index'
+import PortfolioFeature from './features/portfolio/index'
+import AlertsFeature from './features/alerts/index'
 
 export default function App() {
   return (
@@ -21,15 +26,20 @@ export default function App() {
         <main style={{ flex: 1, overflowY: 'auto' }}>
           <Routes>
             <Route path="/" element={<MarketHub />} />
-            <Route path="/reversal/*"     element={<ReversalFeature />} />
-            <Route path="/options/*"      element={<OptionsFeature />} />
-            <Route path="/earnings/*"     element={<EarningsFeature />} />
-            <Route path="/technical/*"    element={<TechnicalFeature />} />
-            <Route path="/fundamental/*"  element={<FundamentalFeature />} />
-            <Route path="/sentiment/*"    element={<SentimentFeature />} />
-            <Route path="/insider/*"      element={<InsiderFeature />} />
-            <Route path="/smart_money/*"  element={<SmartMoneyFeature />} />
-            <Route path="/ai_agent/*"     element={<AIAgentFeature />} />
+            <Route path="/reversal/*"       element={<ReversalFeature />} />
+            <Route path="/options/*"        element={<OptionsFeature />} />
+            <Route path="/earnings/*"       element={<EarningsFeature />} />
+            <Route path="/technical/*"      element={<TechnicalFeature />} />
+            <Route path="/fundamental/*"    element={<FundamentalFeature />} />
+            <Route path="/sentiment/*"      element={<SentimentFeature />} />
+            <Route path="/insider/*"        element={<InsiderFeature />} />
+            <Route path="/smart_money/*"    element={<SmartMoneyFeature />} />
+            <Route path="/ai_agent/*"       element={<AIAgentFeature />} />
+            <Route path="/congress/*"       element={<CongressFeature />} />
+            <Route path="/market_intel/*"   element={<MarketIntelFeature />} />
+            <Route path="/institutional/*"  element={<InstitutionalFeature />} />
+            <Route path="/portfolio/*"      element={<PortfolioFeature />} />
+            <Route path="/alerts/*"         element={<AlertsFeature />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </main>

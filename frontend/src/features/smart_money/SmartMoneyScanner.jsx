@@ -100,6 +100,17 @@ function StockCard({ stock, onSelect }) {
         <SignalRow label="🏦 Inst."    score={stock.signals.institution.score} />
       </div>
 
+      {/* Signal conflict badge */}
+      {stock.conflicts?.length > 0 && (
+        <div style={{ marginBottom: '6px' }}>
+          {stock.conflicts.map((c, i) => (
+            <div key={i} style={{ fontSize: '0.68rem', color: '#f59e0b', background: '#f59e0b18', border: '1px solid #f59e0b44', borderRadius: '4px', padding: '3px 6px', marginBottom: '3px' }}>
+              ⚠ {c.description}
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Key reasons */}
       {stock.top_reasons.length > 0 && (
         <div style={{ borderTop: '1px solid #1e293b', paddingTop: '8px' }}>

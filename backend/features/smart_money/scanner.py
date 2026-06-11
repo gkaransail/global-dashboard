@@ -49,6 +49,34 @@ UNIVERSE = [
 
 WEIGHTS = {"options": 0.40, "insider": 0.35, "institution": 0.25}
 
+CONFLICT_THRESHOLD = 0.25  # minimum absolute score to be considered a directional signal
+
+
+def detect_conflicts(options: dict, insider: dict, institution: dict) -> list[dict]:
+    """Return signal pairs that disagree in direction by >= CONFLICT_THRESHOLD each."""
+    signals = {
+        "options":     options["score"],
+        "insider":     insider["score"],
+        "institution": institution["score"],
+    }
+    pairs = [
+        ("options",     "insider"),
+        ("options",     "institution"),
+        ("insider",     "institution"),
+    ]
+    conflicts = []
+    for a, b in pairs:
+        sa, sb = signals[a], signals[b]
+        if abs(sa) >= CONFLICT_THRESHOLD and abs(sb) >= CONFLICT_THRESHOLD and (sa > 0) != (sb > 0):
+            conflicts.append({
+                "signal_a": a,
+                "score_a": round(sa, 3),
+                "signal_b": b,
+                "score_b": round(sb, 3),
+                "description": f"{a.title()} {'bullish' if sa > 0 else 'bearish'} vs {b.title()} {'bullish' if sb > 0 else 'bearish'}",
+            })
+    return conflicts
+
 
 def _score_ticker(ticker: str) -> Optional[dict]:
     """Score a single ticker across all signal categories."""
@@ -76,6 +104,9 @@ def _score_ticker(ticker: str) -> Optional[dict]:
             inst_data.get("reasons", [])
         )
 
+        # Detect conflicting signals
+        conflicts = detect_conflicts(options_data, insider_data, inst_data)
+
         # Determine overall verdict
         if composite >= 0.35:
             verdict = "Strong Buy"
@@ -94,6 +125,7 @@ def _score_ticker(ticker: str) -> Optional[dict]:
             "change_pct": change_pct,
             "composite_score": composite,
             "verdict": verdict,
+            "conflicts": conflicts,
             "signals": {
                 "options":     options_data,
                 "insider":     insider_data,

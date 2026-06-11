@@ -41,6 +41,9 @@ FEATURE_FLAGS: dict[str, str] = {
     "smart_money":     "free",
     "market_intel":    "free",
     "ai_agent":        "free",   # set to "pro" to gate behind subscription
+    "portfolio":       "free",
+    "alerts":          "free",
+    "institutional":   "free",
 }
 
 

@@ -105,4 +105,61 @@ export const FEATURES = [
       { id: 'chat',     label: '💬 Research Chat',  icon: '💬', path: '/ai_agent/chat' },
     ],
   },
+  {
+    id: 'congress',
+    label: 'Congress Tracker',
+    icon: '🏛',
+    status: 'live',
+    description: 'Congressional stock trades — STOCK Act disclosures from House and Senate members.',
+    subOptions: [
+      { id: 'feed',    label: '📋 Trade Feed',   icon: '📋', path: '/congress/feed' },
+      { id: 'members', label: '👤 Top Members',  icon: '👤', path: '/congress/members' },
+      { id: 'tickers', label: '🔥 Hot Tickers',  icon: '🔥', path: '/congress/tickers' },
+    ],
+  },
+  {
+    id: 'market_intel',
+    label: 'Market Intelligence',
+    icon: '🎯',
+    status: 'live',
+    description: 'Options-weighted multi-factor stock ranking across 1W, 1M, and 3M time horizons.',
+    subOptions: [
+      { id: 'scan',   label: '🎯 Ranked Picks',    icon: '🎯', path: '/market_intel/scan' },
+      { id: 'market', label: '🌐 Market Overview', icon: '🌐', path: '/market_intel/market' },
+    ],
+  },
+  {
+    id: 'institutional',
+    label: '13F Holdings',
+    icon: '🏛',
+    status: 'live',
+    description: 'Institutional ownership from 13F filings — top holders, position changes, and fund flow.',
+    subOptions: [
+      { id: 'holders',  label: '🏛 Top Holders', icon: '🏛', path: '/institutional/holders' },
+      { id: 'flow',     label: '🌊 Fund Flow',   icon: '🌊', path: '/institutional/flow' },
+      { id: 'screener', label: '🔎 Screener',    icon: '🔎', path: '/institutional/screener' },
+    ],
+  },
+  {
+    id: 'portfolio',
+    label: 'Portfolio Tracker',
+    icon: '💼',
+    status: 'live',
+    description: 'Track positions, cost basis, unrealized P&L, and portfolio allocation.',
+    subOptions: [
+      { id: 'holdings', label: '💼 Holdings',    icon: '💼', path: '/portfolio/holdings' },
+      { id: 'summary',  label: '📊 P&L Summary', icon: '📊', path: '/portfolio/summary' },
+    ],
+  },
+  {
+    id: 'alerts',
+    label: 'Alerts & Watchlist',
+    icon: '🔔',
+    status: 'live',
+    description: 'Price alerts and watchlist with signal notifications.',
+    subOptions: [
+      { id: 'watchlist', label: '👁 Watchlist',    icon: '👁', path: '/alerts/watchlist' },
+      { id: 'alerts',    label: '🔔 Price Alerts', icon: '🔔', path: '/alerts/alerts' },
+    ],
+  },
 ]

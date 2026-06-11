@@ -1,9 +1,11 @@
 """
 Options market analysis: expected move, max pain, key OI levels, narrative.
 Timeframe-aware: filters expirations to match selected timeframe window.
+Includes IV Rank and IV Percentile using 1-year rolling HV as proxy.
 """
 import math
 import logging
+import numpy as np
 from datetime import datetime, date, timedelta
 from typing import Optional
 import yfinance as yf
@@ -226,6 +228,50 @@ def generate_narrative(
     return " ".join(lines)
 
 
+def calc_iv_rank(ticker: str, current_iv: float) -> dict:
+    """
+    IV Rank = (current IV - 52w low HV) / (52w high HV - 52w low HV) × 100
+    IV Percentile = % of trading days in past year where HV was below current IV
+    Uses 30-day rolling historical volatility as a proxy for implied volatility.
+    """
+    cache_key = f"iv_rank_{ticker}"
+    cached = _cache.get(cache_key, ttl=3600)
+    if cached:
+        cached["current_iv_pct"] = round(current_iv * 100, 1)
+        return cached
+
+    try:
+        df = yf.Ticker(ticker).history(period="1y", interval="1d", auto_adjust=True)
+        if df is None or len(df) < 30:
+            return {"iv_rank": None, "iv_percentile": None, "iv_52w_low": None, "iv_52w_high": None}
+
+        log_returns = np.log(df["Close"] / df["Close"].shift(1)).dropna()
+        hv_series = log_returns.rolling(window=21).std() * math.sqrt(252)
+        hv_series = hv_series.dropna()
+
+        if len(hv_series) < 10:
+            return {"iv_rank": None, "iv_percentile": None, "iv_52w_low": None, "iv_52w_high": None}
+
+        hv_low  = float(hv_series.min())
+        hv_high = float(hv_series.max())
+        iv_rank = round(((current_iv - hv_low) / (hv_high - hv_low)) * 100, 1) if hv_high > hv_low else 50.0
+        iv_rank = max(0.0, min(100.0, iv_rank))
+        iv_percentile = round(float((hv_series < current_iv).mean()) * 100, 1)
+
+        result = {
+            "iv_rank": iv_rank,
+            "iv_percentile": iv_percentile,
+            "iv_52w_low": round(hv_low * 100, 1),
+            "iv_52w_high": round(hv_high * 100, 1),
+            "current_iv_pct": round(current_iv * 100, 1),
+        }
+        _cache.set(cache_key, result)
+        return result
+    except Exception as e:
+        logger.debug(f"IV rank calc failed for {ticker}: {e}")
+        return {"iv_rank": None, "iv_percentile": None, "iv_52w_low": None, "iv_52w_high": None}
+
+
 def get_analysis(ticker: str, timeframe: str = "3mo") -> dict:
     cache_key = f"options_analysis_{ticker}_{timeframe}"
     cached = _cache.get(cache_key, ttl=CACHE_TTL)
@@ -342,6 +388,8 @@ def get_analysis(ticker: str, timeframe: str = "3mo") -> dict:
         except Exception as e:
             logger.warning(f"Narrative generation failed: {e}")
 
+    iv_rank_data = calc_iv_rank(ticker, atm_iv) if atm_iv else {}
+
     result = {
         "ticker": ticker,
         "timeframe": timeframe,
@@ -355,6 +403,10 @@ def get_analysis(ticker: str, timeframe: str = "3mo") -> dict:
             {"date": e["date"], "dte": e["dte"]} for e in filtered_exps
         ],
         "atm_iv_pct": round(atm_iv * 100, 1) if atm_iv else None,
+        "iv_rank": iv_rank_data.get("iv_rank"),
+        "iv_percentile": iv_rank_data.get("iv_percentile"),
+        "iv_52w_low": iv_rank_data.get("iv_52w_low"),
+        "iv_52w_high": iv_rank_data.get("iv_52w_high"),
         "pc_ratio": pc_ratio,
         "total_call_oi": total_call_oi,
         "total_put_oi": total_put_oi,
