@@ -21,6 +21,8 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 from core import scheduler as _scheduler
 from core.config import settings
@@ -96,9 +98,27 @@ async def scheduler_status():
 
 @app.get("/")
 async def root():
+    # If the built frontend exists, redirect to it
+    _index = Path(__file__).parent.parent / "frontend" / "dist" / "index.html"
+    if _index.exists():
+        return FileResponse(_index)
     return {
         "name":     settings.app_name,
         "version":  settings.version,
         "features": [m["id"] for m in registry.get_manifests()],
         "docs":     "/docs",
     }
+
+
+# ── Serve built React frontend (must be last — catch-all SPA route) ───────────
+# Mount static assets first so /assets/* requests never hit the catch-all.
+# The catch-all returns index.html for every other path so React Router works.
+
+_dist = Path(__file__).parent.parent / "frontend" / "dist"
+if _dist.exists():
+    app.mount("/assets", StaticFiles(directory=_dist / "assets"), name="assets")
+
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        """Serve React SPA for all non-API routes."""
+        return FileResponse(_dist / "index.html")
