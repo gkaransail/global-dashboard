@@ -1,4 +1,7 @@
-const BASE = '/api/v1'
+// In dev: Vite proxies /api → localhost:8000
+// In production (Vercel): set VITE_BACKEND_URL env var to your Render URL
+const BACKEND = import.meta.env.VITE_BACKEND_URL || ''
+const BASE = `${BACKEND}/api/v1`
 
 async function request(path, options = {}) {
   const res = await fetch(`${BASE}${path}`, options)

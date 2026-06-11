@@ -1,10 +1,96 @@
 import { useState, useEffect, useCallback } from 'react'
-import { useStore } from '../../core/store'
+import { useStore, lookbackForTimeframe } from '../../core/store'
 import { api } from '../../core/api'
 import MarketSnapshot from './MarketSnapshot'
 
 const fmt = (v, d = 2) => v == null ? '—' : Number(v).toFixed(d)
 const fmtK = (v) => v >= 1000 ? `${(v/1000).toFixed(1)}K` : String(v)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// "How to Read This Chain" — interactive guide for new users
+// ─────────────────────────────────────────────────────────────────────────────
+function ChainGuide({ spot }) {
+  const [open, setOpen] = useState(false)
+
+  return (
+    <div className="chain-guide">
+      <button className="chain-guide-toggle" onClick={() => setOpen(o => !o)}>
+        <span>📚 How to read this options chain</span>
+        <span className="chain-guide-chevron">{open ? '▲' : '▼'}</span>
+      </button>
+
+      {open && (
+        <div className="chain-guide-body">
+
+          {/* Visual map of the chain layout */}
+          <div className="cg-layout-map">
+            <div className="cg-side cg-calls">
+              <div className="cg-side-title">🟢 LEFT SIDE = CALLS</div>
+              <div className="cg-side-sub">Bets the stock goes <strong>UP</strong></div>
+              <div className="cg-side-detail">Green rows = ITM (stock is already above this strike — these have real value right now)</div>
+            </div>
+            <div className="cg-center">
+              <div className="cg-center-title">STRIKE</div>
+              <div className="cg-center-sub">The price level<br/>the bet is at</div>
+              <div className="cg-atm-badge">ATM = highlighted in blue<br/>(closest to ${spot?.toFixed(0)} — current price)</div>
+            </div>
+            <div className="cg-side cg-puts">
+              <div className="cg-side-title">🔴 RIGHT SIDE = PUTS</div>
+              <div className="cg-side-sub">Bets the stock goes <strong>DOWN</strong></div>
+              <div className="cg-side-detail">Red rows = ITM (stock is already below this strike — these have real value right now)</div>
+            </div>
+          </div>
+
+          {/* Column explanations */}
+          <div className="cg-columns">
+            <div className="cg-col-title">What each column means:</div>
+            <div className="cg-col-grid">
+              {[
+                { col: 'Vol',   color: 'var(--text)',    what: 'Volume',              explain: 'How many contracts traded TODAY. High volume = someone is actively betting here right now.' },
+                { col: 'OI',    color: 'var(--text)',    what: 'Open Interest',       explain: 'Total contracts currently open at this strike. High OI = lots of money sitting here. Stocks often stall or reverse at these levels.' },
+                { col: 'Last',  color: 'var(--muted)',   what: 'Last price',          explain: 'The last traded price of the option contract. Multiply by 100 to get the real cost (each contract = 100 shares).' },
+                { col: 'Bid/Ask',color:'var(--muted)',   what: 'Bid / Ask spread',   explain: 'Bid = what buyers will pay. Ask = what sellers want. Wide spread = illiquid (hard to exit). Tight spread = liquid (easy to trade).' },
+                { col: 'IV%',   color: 'var(--accent-hi)',what: 'Implied Volatility', explain: 'How expensive this option is. High IV% = big move expected = costly option. Low IV% = quiet expected = cheap option. Compare across strikes to spot fear.' },
+                { col: 'Δ Delta',color:'var(--bull)',    what: 'Delta',               explain: 'How much this option moves per $1 change in the stock. Delta 0.50 = moves $0.50 per $1 stock move. Calls: 0 to 1. Puts: -1 to 0. Deep ITM ≈ 1.0.' },
+                { col: 'θ Theta',color:'var(--bear)',    what: 'Theta (time decay)',  explain: 'How much value this option loses every day just from time passing. -$0.05 means the option loses $5 per day per contract (100 shares). Time decay kills options you hold too long.' },
+              ].map(({ col, color, what, explain }) => (
+                <div key={col} className="cg-col-row">
+                  <div className="cg-col-name" style={{ color }}>{col}</div>
+                  <div className="cg-col-what">{what}</div>
+                  <div className="cg-col-explain">{explain}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Quick rules */}
+          <div className="cg-rules">
+            <div className="cg-rules-title">Quick rules when reading a chain:</div>
+            <div className="cg-rules-grid">
+              {[
+                { icon: '📍', rule: 'Start at ATM (blue strike)', detail: 'That\'s where current options pricing is most relevant to the current stock price.' },
+                { icon: '📊', rule: 'Check Call OI vs Put OI', detail: 'If calls have much higher OI than puts → market leans bullish. If puts dominate → people are hedging or betting on a drop.' },
+                { icon: '💰', rule: 'Vol >> OI = unusual activity', detail: 'If today\'s volume is much larger than the existing open interest, someone just made a big directional bet. Check the Unusual Activity tab.' },
+                { icon: '🧱', rule: 'Big OI = price magnet/wall', detail: 'Strikes with massive OI act like magnets near expiry (max pain) or walls that resist price movement.' },
+                { icon: '📈', rule: 'High IV% → expensive options', detail: 'Before earnings or big events, IV spikes. After the event passes, IV crashes (IV crush), killing option value even if the stock moved your way.' },
+                { icon: '⏰', rule: 'Theta kills slow trades', detail: 'Every day that passes, your option loses value from time decay (theta). Only buy options when you expect a move SOON.' },
+              ].map(({ icon, rule, detail }) => (
+                <div key={rule} className="cg-rule-card">
+                  <div className="cg-rule-icon">{icon}</div>
+                  <div>
+                    <div className="cg-rule-name">{rule}</div>
+                    <div className="cg-rule-detail">{detail}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+        </div>
+      )}
+    </div>
+  )
+}
 
 function SummaryBar({ summary, spot }) {
   const { total_call_oi, total_put_oi, total_call_vol, total_put_vol, pc_oi_ratio, atm_iv_pct } = summary
@@ -174,6 +260,9 @@ export default function OptionsChain() {
 
   return (
     <div className="pad" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+
+      {/* How to read guide — for new users */}
+      <ChainGuide spot={spot} />
 
       {/* Market Snapshot — timeframe-aware analysis */}
       <MarketSnapshot onExpSelected={handleSnapshotExp} />

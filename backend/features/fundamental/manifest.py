@@ -1,12 +1,14 @@
 MANIFEST = {
     "id": "fundamental",
     "label": "Fundamental Analysis",
-    "icon": "📊",
+    "icon": "🏦",
+    "description": "Valuation ratios, growth scores, financial health, and fundamental screener.",
     "status": "live",
-    "description": "Valuation metrics, earnings quality, and financial health scoring",
-    "subOptions": [
-        {"id": "overview", "label": "Overview"},
-        {"id": "valuation", "label": "Valuation"},
-        {"id": "health", "label": "Financial Health"},
-    ]
+    "api_prefix": "/api/v1/fundamental",
+    "sub_options": [
+        {"id": "valuation", "label": "Valuation",     "icon": "💹"},
+        {"id": "growth",    "label": "Growth Score",  "icon": "📈"},
+        {"id": "health",    "label": "Quality Score", "icon": "🏥"},
+        {"id": "screener",  "label": "Screener",      "icon": "🔎"},
+    ],
 }

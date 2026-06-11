@@ -64,18 +64,20 @@ async def skew(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+VALID_TIMEFRAMES = {"1h", "1d", "1w", "1mo", "3mo", "6mo", "1y", "5y", "all"}
+
 @router.get("/analysis/{ticker}")
 async def analysis(
     ticker: str,
-    timeframe: str = Query("3mo", description="Timeframe: 1mo | 3mo | 6mo | 1y"),
+    timeframe: str = Query("3mo", description="Timeframe: 1h | 1d | 1w | 1mo | 3mo | 6mo | 1y | 5y | all"),
 ):
     """
     Timeframe-aware market snapshot: expected move, max pain, key OI levels,
-    P/C sentiment, and narrative explanation. Filters expirations to match
-    the selected timeframe window.
+    P/C sentiment, and narrative. Selects the nearest expiration matching
+    the timeframe (1h/1d → 0-3DTE, 1w → 7DTE, 1mo → 30DTE, etc.)
     """
-    if timeframe not in ("1mo", "3mo", "6mo", "1y"):
-        raise HTTPException(status_code=400, detail="timeframe must be one of: 1mo, 3mo, 6mo, 1y")
+    if timeframe not in VALID_TIMEFRAMES:
+        raise HTTPException(status_code=400, detail=f"timeframe must be one of: {', '.join(sorted(VALID_TIMEFRAMES))}")
     try:
         return get_analysis(ticker, timeframe)
     except Exception as e:

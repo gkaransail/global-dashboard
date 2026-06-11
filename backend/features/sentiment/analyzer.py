@@ -1,339 +1,334 @@
 """
-Market Sentiment Analyzer.
+Market Sentiment — Fear & Greed composite index.
 
-Provides news sentiment scoring via keyword analysis, analyst ratings from
-yfinance recommendations_summary, and a composite sentiment overview.
+Seven indicators, each scored -1.0 (extreme fear) to +1.0 (extreme greed):
+
+  1. VIX vs 50MA       — low/rising VIX = fear, high/falling VIX = greed
+  2. SPY Momentum      — 125-day price momentum
+  3. Put/Call Ratio    — market-wide PCR across SPY options
+  4. Safe Haven Demand — TLT relative strength vs SPY
+  5. Junk Bond Demand  — HYG vs LQD relative performance
+  6. Market Breadth    — % of sector ETFs above their 200MA
+  7. Price Strength    — % of sectors near 52-week highs
+
+Composite score 0–100 (maps from -1.0/+1.0 range).
+Ranges: 0-25 Extreme Fear, 25-45 Fear, 45-55 Neutral, 55-75 Greed, 75-100 Extreme Greed
 """
-
 import logging
-import math
-from typing import Any, Dict, List, Optional
-
+import numpy as np
 import pandas as pd
 import yfinance as yf
-
+from datetime import datetime, timezone
 from core import cache as _cache
 
 logger = logging.getLogger(__name__)
 
-CACHE_TTL = 300  # 5 minutes
+CACHE_TTL = 900  # 15 minutes — sentiment moves intraday
 
-POSITIVE_KEYWORDS = [
-    "beats", "surges", "record", "growth", "profit", "raises", "upgrade",
-    "buy", "bullish", "strong", "outperform", "rally", "gains", "jumps",
-    "exceeds", "positive", "boost", "wins", "expands",
-]
-
-NEGATIVE_KEYWORDS = [
-    "misses", "drops", "loss", "decline", "cuts", "downgrade", "sell",
-    "bearish", "weak", "underperform", "crash", "bankruptcy", "falls",
-    "slumps", "concern", "risk", "warning", "disappoints", "miss",
-]
+SECTOR_ETFS = ["XLK", "XLF", "XLV", "XLE", "XLI", "XLY", "XLP", "XLB", "XLRE", "XLU", "XLC"]
 
 
-def _safe_float(val: Any) -> Optional[float]:
+def _safe_download(ticker: str, period: str = "1y") -> pd.DataFrame:
     try:
-        f = float(val)
-        return None if (math.isnan(f) or math.isinf(f)) else f
-    except (TypeError, ValueError):
-        return None
+        df = yf.download(ticker, period=period, progress=False, auto_adjust=True)
+        if df.empty:
+            return pd.DataFrame()
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        return df
+    except Exception as e:
+        logger.warning(f"Download failed for {ticker}: {e}")
+        return pd.DataFrame()
 
 
-class SentimentAnalyzer:
-    """Analyzes market sentiment for a given ticker using yfinance data."""
+def _clamp(val: float, lo: float = -1.0, hi: float = 1.0) -> float:
+    return max(lo, min(hi, val))
 
-    def get_news_sentiment(self, ticker: str) -> Dict:
-        """
-        Fetch recent news and compute keyword-based sentiment score.
-        """
-        cache_key = f"sentiment:news:{ticker.upper()}"
-        cached = _cache.get(cache_key, CACHE_TTL)
-        if cached is not None:
-            return cached
 
-        try:
-            t = yf.Ticker(ticker.upper())
-            news = t.news or []
-        except Exception as e:
-            logger.warning(f"SentimentAnalyzer.get_news_sentiment({ticker}): {e}")
-            news = []
+# ── Indicator 1: VIX vs 50-day MA ──────────────────────────────────────────
 
-        articles: List[Dict] = []
-        positive_count = 0
-        negative_count = 0
+def _vix_indicator() -> dict:
+    df = _safe_download("^VIX", period="6mo")
+    if df.empty or len(df) < 50:
+        return {"score": 0.0, "value": None, "ma50": None, "detail": "no data"}
 
-        for item in news:
-            try:
-                title = str(item.get("title") or "").lower()
-                publisher = str(item.get("publisher") or item.get("source") or "")
-                link = str(item.get("link") or item.get("url") or "")
+    vix = float(df["Close"].iloc[-1])
+    ma50 = float(df["Close"].rolling(50).mean().iloc[-1])
 
-                # Published timestamp
-                pub_ts = item.get("providerPublishTime") or item.get("publishedAt")
-                if pub_ts:
-                    try:
-                        import datetime
-                        published_at = datetime.datetime.utcfromtimestamp(int(pub_ts)).strftime("%Y-%m-%dT%H:%M:%SZ")
-                    except Exception:
-                        published_at = str(pub_ts)
-                else:
-                    published_at = None
+    # VIX below MA = calming (greed), above MA = fear
+    ratio = (ma50 - vix) / ma50  # positive = VIX below MA
+    score = _clamp(ratio * 3)    # scale: ±33% deviation → ±1.0
 
-                articles.append({
-                    "title": item.get("title") or "",
-                    "publisher": publisher,
-                    "link": link,
-                    "published_at": published_at,
-                })
+    # Absolute level adjustment: VIX > 30 is always fearful regardless of MA
+    if vix > 30:
+        score = _clamp(score - 0.4)
+    elif vix < 15:
+        score = _clamp(score + 0.2)
 
-                # Keyword scoring
-                pos = sum(1 for kw in POSITIVE_KEYWORDS if kw in title)
-                neg = sum(1 for kw in NEGATIVE_KEYWORDS if kw in title)
-                positive_count += min(pos, 2)  # cap per article
-                negative_count += min(neg, 2)
+    label = "low/falling" if score > 0.1 else "high/rising" if score < -0.1 else "neutral"
+    return {
+        "score": round(score, 3),
+        "value": round(vix, 2),
+        "ma50": round(ma50, 2),
+        "detail": f"VIX {vix:.1f} vs 50MA {ma50:.1f} ({label})"
+    }
 
-            except Exception:
-                continue
 
-        total_news = len(articles)
-        if total_news > 0:
-            raw_score = (positive_count - negative_count) / max(total_news, 1)
-            sentiment_score = round(max(-1.0, min(1.0, raw_score)), 4)
-        else:
-            sentiment_score = 0.0
+# ── Indicator 2: SPY 125-day Momentum ──────────────────────────────────────
 
-        if sentiment_score > 0.1:
-            signal = "bullish"
-        elif sentiment_score < -0.1:
-            signal = "bearish"
-        else:
-            signal = "neutral"
+def _momentum_indicator() -> dict:
+    df = _safe_download("SPY", period="1y")
+    if df.empty or len(df) < 126:
+        return {"score": 0.0, "value": None, "momentum_pct": None, "detail": "no data"}
 
-        result = {
-            "ticker": ticker.upper(),
-            "articles": articles[:20],
-            "article_count": total_news,
-            "sentiment_score": sentiment_score,
-            "positive_count": positive_count,
-            "negative_count": negative_count,
-            "signal": signal,
+    current = float(df["Close"].iloc[-1])
+    past = float(df["Close"].iloc[-126])
+    momentum_pct = (current - past) / past * 100
+
+    # +20% over 125 days → max greed; -20% → max fear
+    score = _clamp(momentum_pct / 20)
+
+    return {
+        "score": round(score, 3),
+        "value": round(current, 2),
+        "momentum_pct": round(momentum_pct, 2),
+        "detail": f"SPY {momentum_pct:+.1f}% over 125 days"
+    }
+
+
+# ── Indicator 3: Put/Call Ratio ────────────────────────────────────────────
+
+def _pcr_indicator() -> dict:
+    try:
+        spy = yf.Ticker("SPY")
+        exps = spy.options
+        if not exps:
+            return {"score": 0.0, "pcr": None, "detail": "no options data"}
+
+        total_call_vol = 0
+        total_put_vol = 0
+        for exp in exps[:3]:  # 3 nearest expirations
+            chain = spy.option_chain(exp)
+            total_call_vol += int(chain.calls["volume"].fillna(0).sum())
+            total_put_vol += int(chain.puts["volume"].fillna(0).sum())
+
+        if total_call_vol == 0:
+            return {"score": 0.0, "pcr": None, "detail": "zero call volume"}
+
+        pcr = total_put_vol / total_call_vol
+
+        # PCR < 0.7 = greed (heavy calls), PCR > 1.4 = fear (heavy puts)
+        # score = -1.0 at PCR 1.4, 0 at PCR 1.0, +1.0 at PCR 0.6
+        score = _clamp((1.0 - pcr) * 2.5)
+
+        direction = "call-heavy (greed)" if pcr < 0.9 else "put-heavy (fear)" if pcr > 1.1 else "balanced"
+        return {
+            "score": round(score, 3),
+            "pcr": round(pcr, 3),
+            "detail": f"PCR {pcr:.2f} — {direction}"
         }
+    except Exception as e:
+        logger.warning(f"PCR calc failed: {e}")
+        return {"score": 0.0, "pcr": None, "detail": str(e)}
 
-        _cache.set(cache_key, result)
-        return result
 
-    def get_analyst_ratings(self, ticker: str) -> Dict:
-        """
-        Fetch analyst recommendations summary and price targets.
-        """
-        cache_key = f"sentiment:analysts:{ticker.upper()}"
-        cached = _cache.get(cache_key, CACHE_TTL)
-        if cached is not None:
-            return cached
+# ── Indicator 4: Safe Haven Demand ─────────────────────────────────────────
 
-        try:
-            t = yf.Ticker(ticker.upper())
-            rec_df = t.recommendations_summary
-            info = t.info or {}
-        except Exception as e:
-            logger.warning(f"SentimentAnalyzer.get_analyst_ratings({ticker}): {e}")
-            rec_df = None
-            info = {}
+def _safe_haven_indicator() -> dict:
+    tlt = _safe_download("TLT", period="3mo")
+    spy = _safe_download("SPY", period="3mo")
 
-        strong_buy = 0
-        buy_count = 0
-        hold_count = 0
-        sell_count = 0
-        strong_sell = 0
-        total = 0
+    if tlt.empty or spy.empty or len(tlt) < 20:
+        return {"score": 0.0, "tlt_ret": None, "spy_ret": None, "detail": "no data"}
 
-        if rec_df is not None and not (hasattr(rec_df, "empty") and rec_df.empty):
-            try:
-                # Take the most recent period row
-                if isinstance(rec_df, pd.DataFrame) and len(rec_df) > 0:
-                    row = rec_df.iloc[0]
-                    # Column names vary: strongBuy, Buy, Hold, Sell, strongSell (or lower case)
-                    col_map = {c.lower(): c for c in rec_df.columns}
+    # 20-day return comparison: TLT outperforming = fear (flight to safety)
+    tlt_ret = (float(tlt["Close"].iloc[-1]) - float(tlt["Close"].iloc[-20])) / float(tlt["Close"].iloc[-20])
+    spy_ret = (float(spy["Close"].iloc[-1]) - float(spy["Close"].iloc[-20])) / float(spy["Close"].iloc[-20])
 
-                    def _get_col(keys):
-                        for k in keys:
-                            col = col_map.get(k)
-                            if col is not None:
-                                v = _safe_float(row[col])
-                                return int(v) if v is not None else 0
-                        return 0
+    # Spread: if bonds outperform stocks, fear; if stocks outperform, greed
+    spread = spy_ret - tlt_ret
+    score = _clamp(spread * 10)  # ±10% spread → ±1.0
 
-                    strong_buy = _get_col(["strongbuy", "strong_buy"])
-                    buy_count = _get_col(["buy"])
-                    hold_count = _get_col(["hold"])
-                    sell_count = _get_col(["sell"])
-                    strong_sell = _get_col(["strongsell", "strong_sell"])
-                    total = strong_buy + buy_count + hold_count + sell_count + strong_sell
-            except Exception as ex:
-                logger.debug(f"Analyst rating parsing error: {ex}")
+    direction = "stocks outperforming (greed)" if spread > 0.01 else "bonds outperforming (fear)" if spread < -0.01 else "neutral"
+    return {
+        "score": round(score, 3),
+        "tlt_ret": round(tlt_ret * 100, 2),
+        "spy_ret": round(spy_ret * 100, 2),
+        "detail": f"SPY {spy_ret*100:+.1f}% vs TLT {tlt_ret*100:+.1f}% (20d) — {direction}"
+    }
 
-        bullish_pct = round((strong_buy + buy_count) / max(total, 1), 4)
 
-        # Recommendation score: normalize to [-1, 1]
-        if total > 0:
-            weighted_sum = (strong_buy * 2 + buy_count * 1 + hold_count * 0 +
-                            sell_count * -1 + strong_sell * -2)
-            recommendation_score = round(weighted_sum / (total * 2), 4)
-        else:
-            recommendation_score = 0.0
+# ── Indicator 5: Junk Bond Demand ──────────────────────────────────────────
 
-        # Current rating from score
-        if recommendation_score > 0.5:
-            current_rating = "Strong Buy"
-        elif recommendation_score > 0.15:
-            current_rating = "Buy"
-        elif recommendation_score > -0.15:
-            current_rating = "Hold"
-        elif recommendation_score > -0.5:
-            current_rating = "Sell"
-        else:
-            current_rating = "Strong Sell"
+def _junk_bond_indicator() -> dict:
+    hyg = _safe_download("HYG", period="3mo")
+    lqd = _safe_download("LQD", period="3mo")
 
-        # Price target from info
-        price_target = (
-            _safe_float(info.get("targetMeanPrice"))
-            or _safe_float(info.get("targetPrice"))
-        )
+    if hyg.empty or lqd.empty or len(hyg) < 20:
+        return {"score": 0.0, "hyg_ret": None, "lqd_ret": None, "detail": "no data"}
 
-        result = {
-            "ticker": ticker.upper(),
-            "current_rating": current_rating,
-            "strong_buy": strong_buy,
-            "buy_count": buy_count,
-            "hold_count": hold_count,
-            "sell_count": sell_count,
-            "strong_sell": strong_sell,
-            "total_analysts": total,
-            "bullish_pct": bullish_pct,
-            "recommendation_score": recommendation_score,
-            "price_target": price_target,
-        }
+    hyg_ret = (float(hyg["Close"].iloc[-1]) - float(hyg["Close"].iloc[-20])) / float(hyg["Close"].iloc[-20])
+    lqd_ret = (float(lqd["Close"].iloc[-1]) - float(lqd["Close"].iloc[-20])) / float(lqd["Close"].iloc[-20])
 
-        _cache.set(cache_key, result)
-        return result
+    # HYG outperforming LQD = risk-on (greed), underperforming = risk-off (fear)
+    spread = hyg_ret - lqd_ret
+    score = _clamp(spread * 15)
 
-    def get_signals(self, ticker: str) -> List[Dict]:
-        """
-        Return sentiment signals for composite scoring.
-        """
-        cache_key = f"sentiment:signals:{ticker.upper()}"
-        cached = _cache.get(cache_key, CACHE_TTL)
-        if cached is not None:
-            return cached
+    direction = "risk-on (greed)" if spread > 0.005 else "risk-off (fear)" if spread < -0.005 else "neutral"
+    return {
+        "score": round(score, 3),
+        "hyg_ret": round(hyg_ret * 100, 2),
+        "lqd_ret": round(lqd_ret * 100, 2),
+        "detail": f"HYG {hyg_ret*100:+.1f}% vs LQD {lqd_ret*100:+.1f}% (20d) — {direction}"
+    }
 
-        try:
-            news = self.get_news_sentiment(ticker)
-            analysts = self.get_analyst_ratings(ticker)
-            signals: List[Dict] = []
 
-            # 1. News Sentiment
-            news_score = news.get("sentiment_score", 0.0)
-            if news_score != 0.0:
-                news_strength = round(abs(news_score) * 0.8, 4)
-                signals.append({
-                    "name": "News Sentiment",
-                    "category": "sentiment",
-                    "direction": "bullish" if news_score > 0 else "bearish",
-                    "strength": news_strength,
-                    "value": round(news_score, 4),
-                    "explanation": (
-                        f"News keyword sentiment score of {news_score:+.2f} based on "
-                        f"{news.get('article_count', 0)} recent articles "
-                        f"({news.get('positive_count', 0)} positive, {news.get('negative_count', 0)} negative signals)."
-                    ),
-                })
+# ── Indicator 6: Market Breadth ─────────────────────────────────────────────
 
-            # 2. Analyst Consensus
-            bullish_pct = analysts.get("bullish_pct", 0.5)
-            total = analysts.get("total_analysts", 0)
-            if total > 0:
-                if bullish_pct > 0.70:
-                    signals.append({
-                        "name": "Analyst Consensus",
-                        "category": "sentiment",
-                        "direction": "bullish",
-                        "strength": 0.70,
-                        "value": round(bullish_pct, 4),
-                        "explanation": (
-                            f"{bullish_pct*100:.0f}% of {total} analysts rate this stock Buy or Strong Buy — "
-                            "strong bullish analyst consensus."
-                        ),
-                    })
-                elif bullish_pct < 0.30:
-                    signals.append({
-                        "name": "Analyst Consensus",
-                        "category": "sentiment",
-                        "direction": "bearish",
-                        "strength": 0.65,
-                        "value": round(bullish_pct, 4),
-                        "explanation": (
-                            f"Only {bullish_pct*100:.0f}% of {total} analysts rate this stock Buy or Strong Buy — "
-                            "weak analyst consensus; majority are neutral to bearish."
-                        ),
-                    })
+def _breadth_indicator() -> dict:
+    above_200ma = 0
+    total = 0
+    sector_data = []
 
-            _cache.set(cache_key, signals)
-            return signals
+    for etf in SECTOR_ETFS:
+        df = _safe_download(etf, period="1y")
+        if df.empty or len(df) < 200:
+            continue
+        price = float(df["Close"].iloc[-1])
+        ma200 = float(df["Close"].rolling(200).mean().iloc[-1])
+        is_above = price > ma200
+        above_200ma += int(is_above)
+        total += 1
+        sector_data.append({"ticker": etf, "price": round(price, 2), "ma200": round(ma200, 2), "above": is_above})
 
-        except Exception as e:
-            logger.warning(f"SentimentAnalyzer.get_signals({ticker}): {e}")
-            return []
+    if total == 0:
+        return {"score": 0.0, "pct_above_200ma": None, "detail": "no data"}
 
-    def get_sentiment_overview(self, ticker: str) -> Dict:
-        """
-        Return composite sentiment overview combining news, analyst, and momentum signals.
-        """
-        cache_key = f"sentiment:overview:{ticker.upper()}"
-        cached = _cache.get(cache_key, CACHE_TTL)
-        if cached is not None:
-            return cached
+    pct = above_200ma / total
+    # 100% above → +1.0, 0% above → -1.0
+    score = _clamp((pct - 0.5) * 4)
 
-        try:
-            news = self.get_news_sentiment(ticker)
-            analysts = self.get_analyst_ratings(ticker)
-            signals = self.get_signals(ticker)
+    return {
+        "score": round(score, 3),
+        "pct_above_200ma": round(pct * 100, 1),
+        "above_count": above_200ma,
+        "total_sectors": total,
+        "sectors": sector_data,
+        "detail": f"{above_200ma}/{total} sectors above 200MA ({pct*100:.0f}%)"
+    }
 
-            news_score = news.get("sentiment_score", 0.0)
-            analyst_score = analysts.get("recommendation_score", 0.0)
 
-            # Simple composite: 60% analyst, 40% news
-            composite_score = round(analyst_score * 0.60 + news_score * 0.40, 4)
+# ── Indicator 7: Price Strength ─────────────────────────────────────────────
 
-            result = {
-                "ticker": ticker.upper(),
-                "composite_score": composite_score,
-                "news_score": news_score,
-                "analyst_score": analyst_score,
-                "momentum_score": 0.0,  # placeholder — no momentum-specific data here
-                "signals": signals,
-                "news_summary": {
-                    "article_count": news.get("article_count", 0),
-                    "signal": news.get("signal", "neutral"),
-                },
-                "analyst_summary": {
-                    "current_rating": analysts.get("current_rating", "N/A"),
-                    "bullish_pct": analysts.get("bullish_pct", 0.0),
-                    "total_analysts": analysts.get("total_analysts", 0),
-                    "price_target": analysts.get("price_target"),
-                },
-            }
+def _price_strength_indicator() -> dict:
+    near_high = 0
+    total = 0
+    sector_data = []
 
-            _cache.set(cache_key, result)
-            return result
+    for etf in SECTOR_ETFS:
+        df = _safe_download(etf, period="1y")
+        if df.empty or len(df) < 50:
+            continue
+        price = float(df["Close"].iloc[-1])
+        high_52w = float(df["Close"].max())
+        pct_from_high = (price - high_52w) / high_52w * 100
+        is_near = pct_from_high >= -5  # within 5% of 52w high
+        near_high += int(is_near)
+        total += 1
+        sector_data.append({"ticker": etf, "price": round(price, 2), "high_52w": round(high_52w, 2), "pct_from_high": round(pct_from_high, 1), "near_high": is_near})
 
-        except Exception as e:
-            logger.warning(f"SentimentAnalyzer.get_sentiment_overview({ticker}): {e}")
-            return {
-                "ticker": ticker.upper(),
-                "composite_score": 0.0,
-                "news_score": 0.0,
-                "analyst_score": 0.0,
-                "momentum_score": 0.0,
-                "signals": [],
-                "error": str(e),
-            }
+    if total == 0:
+        return {"score": 0.0, "pct_near_high": None, "detail": "no data"}
+
+    pct = near_high / total
+    score = _clamp((pct - 0.5) * 4)
+
+    return {
+        "score": round(score, 3),
+        "pct_near_high": round(pct * 100, 1),
+        "near_high_count": near_high,
+        "total_sectors": total,
+        "sectors": sector_data,
+        "detail": f"{near_high}/{total} sectors within 5% of 52w high"
+    }
+
+
+# ── Composite ────────────────────────────────────────────────────────────────
+
+WEIGHTS = {
+    "vix":          0.20,
+    "momentum":     0.15,
+    "pcr":          0.20,
+    "safe_haven":   0.15,
+    "junk_bond":    0.10,
+    "breadth":      0.10,
+    "price_strength": 0.10,
+}
+
+LABELS = [
+    (75, "Extreme Greed"),
+    (55, "Greed"),
+    (45, "Neutral"),
+    (25, "Fear"),
+    (0,  "Extreme Fear"),
+]
+
+
+def _score_to_index(score: float) -> int:
+    """Map -1.0..+1.0 to 0..100."""
+    return int(round((score + 1.0) / 2.0 * 100))
+
+
+def _verdict(index: int) -> str:
+    for threshold, label in LABELS:
+        if index >= threshold:
+            return label
+    return "Extreme Fear"
+
+
+def get_sentiment() -> dict:
+    cached = _cache.get("sentiment:composite", ttl=CACHE_TTL)
+    if cached:
+        return cached
+
+    indicators = {
+        "vix":            _vix_indicator(),
+        "momentum":       _momentum_indicator(),
+        "pcr":            _pcr_indicator(),
+        "safe_haven":     _safe_haven_indicator(),
+        "junk_bond":      _junk_bond_indicator(),
+        "breadth":        _breadth_indicator(),
+        "price_strength": _price_strength_indicator(),
+    }
+
+    composite = sum(indicators[k]["score"] * WEIGHTS[k] for k in WEIGHTS)
+    composite = _clamp(composite)
+    fg_index = _score_to_index(composite)
+
+    # Previous reading for delta (1h cache means this won't often differ but gives structure for future)
+    prev_cached = _cache.get("sentiment:prev", ttl=86400)
+    prev_index = prev_cached["fg_index"] if prev_cached else fg_index
+
+    result = {
+        "fg_index": fg_index,
+        "verdict": _verdict(fg_index),
+        "composite_score": round(composite, 4),
+        "prev_index": prev_index,
+        "change": fg_index - prev_index,
+        "last_updated": datetime.now(timezone.utc).isoformat(),
+        "indicators": {
+            "vix":          {**indicators["vix"],          "weight": WEIGHTS["vix"],          "label": "Market Volatility",    "fg_score": _score_to_index(indicators["vix"]["score"])},
+            "momentum":     {**indicators["momentum"],     "weight": WEIGHTS["momentum"],     "label": "Market Momentum",      "fg_score": _score_to_index(indicators["momentum"]["score"])},
+            "pcr":          {**indicators["pcr"],          "weight": WEIGHTS["pcr"],          "label": "Put/Call Ratio",       "fg_score": _score_to_index(indicators["pcr"]["score"])},
+            "safe_haven":   {**indicators["safe_haven"],   "weight": WEIGHTS["safe_haven"],   "label": "Safe Haven Demand",    "fg_score": _score_to_index(indicators["safe_haven"]["score"])},
+            "junk_bond":    {**indicators["junk_bond"],    "weight": WEIGHTS["junk_bond"],    "label": "Junk Bond Demand",     "fg_score": _score_to_index(indicators["junk_bond"]["score"])},
+            "breadth":      {**indicators["breadth"],      "weight": WEIGHTS["breadth"],      "label": "Market Breadth",       "fg_score": _score_to_index(indicators["breadth"]["score"])},
+            "price_strength": {**indicators["price_strength"], "weight": WEIGHTS["price_strength"], "label": "Price Strength", "fg_score": _score_to_index(indicators["price_strength"]["score"])},
+        },
+    }
+
+    _cache.set("sentiment:composite", result)
+    # Store current as previous for next cycle
+    _cache.set("sentiment:prev", {"fg_index": fg_index})
+
+    return result

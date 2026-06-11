@@ -1,12 +1,12 @@
 MANIFEST = {
     "id": "insider",
-    "label": "Insider Trading",
-    "icon": "👔",
+    "label": "Insider Tracker",
+    "icon": "👁",
+    "description": "SEC Form 4 insider buying and selling — open market purchases, cluster signals, and transaction history.",
     "status": "live",
-    "description": "SEC insider transactions, cluster buys, and sentiment scoring",
-    "subOptions": [
-        {"id": "transactions", "label": "Transactions"},
-        {"id": "sentiment", "label": "Insider Sentiment"},
-        {"id": "signals", "label": "Buy/Sell Signals"},
-    ]
+    "api_prefix": "/api/v1/insider",
+    "sub_options": [
+        {"id": "feed",    "label": "Transaction Feed", "icon": "📋"},
+        {"id": "cluster", "label": "Cluster Buys",     "icon": "🎯"},
+    ],
 }

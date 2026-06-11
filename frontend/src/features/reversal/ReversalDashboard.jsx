@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { useStore } from '../../core/store'
+import { useStore, lookbackForTimeframe } from '../../core/store'
 import { api } from '../../core/api'
 
 const DIR_COLOR  = { bullish_reversal: 'var(--bull)', bearish_reversal: 'var(--bear)', neutral: 'var(--neutral)' }
@@ -32,7 +32,7 @@ export default function ReversalDashboard() {
   async function fetchData() {
     setLoading(true); setError(null)
     try {
-      const days = { '1mo': 30, '3mo': 90, '6mo': 180, '1y': 365 }[timeframe] || 90
+      const days = lookbackForTimeframe(timeframe)
       const d = await api.get(`/reversal/analyze/${ticker}?explain=${explain}&lookback_days=${days}`)
       setData(d)
     } catch (e) { setError(e.message) }

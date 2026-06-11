@@ -1,15 +1,26 @@
-import { Routes, Route, Navigate, NavLink } from 'react-router-dom'
-import FundamentalOverview from './FundamentalOverview'
-import Valuation from './Valuation'
-import HealthScore from './HealthScore'
+import { Routes, Route, Navigate, NavLink, useNavigate } from 'react-router-dom'
+import { useStore } from '../../core/store'
+import ValuationView from './ValuationView'
+import GrowthView from './GrowthView'
+import QualityView from './QualityView'
+import FundamentalScreener from './FundamentalScreener'
 
 const TABS = [
-  { path: 'overview',  label: '🏢 Overview' },
-  { path: 'valuation', label: '💲 Valuation' },
-  { path: 'health',    label: '❤️ Financial Health' },
+  { path: 'valuation', label: '💹 Valuation' },
+  { path: 'growth',    label: '📈 Growth' },
+  { path: 'quality',   label: '🏥 Quality' },
+  { path: 'screener',  label: '🔎 Screener' },
 ]
 
 export default function FundamentalFeature() {
+  const setTicker = useStore(s => s.setTicker)
+  const navigate = useNavigate()
+
+  const handleSelectTicker = (ticker) => {
+    setTicker(ticker)
+    navigate('valuation')
+  }
+
   return (
     <div className="feature-root">
       <nav className="sub-tabs">
@@ -25,10 +36,11 @@ export default function FundamentalFeature() {
       </nav>
       <div className="sub-content">
         <Routes>
-          <Route path="overview"  element={<FundamentalOverview />} />
-          <Route path="valuation" element={<Valuation />} />
-          <Route path="health"    element={<HealthScore />} />
-          <Route path="*"         element={<Navigate to="overview" replace />} />
+          <Route index element={<Navigate to="valuation" replace />} />
+          <Route path="valuation" element={<ValuationView />} />
+          <Route path="growth"    element={<GrowthView />} />
+          <Route path="quality"   element={<QualityView />} />
+          <Route path="screener"  element={<FundamentalScreener onSelectTicker={handleSelectTicker} />} />
         </Routes>
       </div>
     </div>

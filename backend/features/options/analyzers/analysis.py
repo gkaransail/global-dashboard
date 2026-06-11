@@ -14,7 +14,18 @@ CACHE_TTL = 180
 
 
 def timeframe_to_days(timeframe: str) -> int:
-    mapping = {"1mo": 30, "3mo": 90, "6mo": 180, "1y": 365}
+    # Maps timeframe key → target DTE for expiration selection
+    mapping = {
+        "1h":  1,
+        "1d":  3,
+        "1w":  7,
+        "1mo": 30,
+        "3mo": 90,
+        "6mo": 180,
+        "1y":  365,
+        "5y":  730,
+        "all": 730,
+    }
     return mapping.get(timeframe, 90)
 
 

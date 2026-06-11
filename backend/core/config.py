@@ -2,7 +2,7 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    app_name: str = "Global Financial Intelligence Dashboard"
+    app_name: str = "FinanceIQ — Market Intelligence"
     version: str = "1.0.0"
     debug: bool = False
     api_prefix: str = "/api/v1"
@@ -15,8 +15,34 @@ class Settings(BaseSettings):
     reversal_confidence_threshold: float = 0.55
     strong_signal_threshold: float = 0.75
 
+    # Anthropic (optional — enables AI Research Agent)
+    anthropic_api_key: str = ""
+
     class Config:
         env_file = ".env"
 
 
 settings = Settings()
+
+
+# ── Feature flags ────────────────────────────────────────────────────────────
+# Change "free" → "pro" to gate any feature behind a Pro subscription tier.
+# require_feature() reads from here — no other code changes needed.
+
+FEATURE_FLAGS: dict[str, str] = {
+    "reversal":        "free",
+    "options":         "free",
+    "earnings":        "free",
+    "technical":       "free",
+    "fundamental":     "free",
+    "sentiment":       "free",
+    "insider":         "free",
+    "congress":        "free",
+    "smart_money":     "free",
+    "market_intel":    "free",
+    "ai_agent":        "free",   # set to "pro" to gate behind subscription
+}
+
+
+def get_required_tier(feature: str) -> str:
+    return FEATURE_FLAGS.get(feature, "pro")

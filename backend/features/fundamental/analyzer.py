@@ -1,386 +1,782 @@
 """
-Fundamental Analysis Analyzer.
-
-Provides valuation metrics, financial health scoring, and fundamental signals
-using yfinance stock info data.
+Fundamental analyzer — fetches valuation, growth, and quality metrics for a ticker.
+Uses yfinance directly for financial statement data.
 """
-
-import logging
 import math
-from typing import Any, Dict, List, Optional
-
+import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Optional, Any
 import yfinance as yf
-
+import pandas as pd
 from core import cache as _cache
 
 logger = logging.getLogger(__name__)
 
-CACHE_TTL = 300  # 5 minutes
+CACHE_TTL = 3600          # 1 hour — financial data is slow to fetch
+SCREENER_TTL = 1800       # 30 min for screener
 
-# Reasonable caps to prevent outlier values from distorting scores
-_FLOAT_CAPS = {
-    "pe_ratio": 500.0,
-    "forward_pe": 500.0,
-    "peg_ratio": 20.0,
-    "debt_to_equity": 50.0,
-    "current_ratio": 20.0,
-    "quick_ratio": 20.0,
-    "beta": 10.0,
-    "roe": 5.0,
-    "roa": 2.0,
-    "profit_margin": 1.0,
-    "operating_margin": 1.0,
-    "revenue_growth": 5.0,
-}
+SCREENER_UNIVERSE = [
+    "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "JPM", "BAC",
+    "GS", "AMD", "NFLX", "CRM", "ORCL", "INTC", "BRK-B", "JNJ", "PFE",
+    "UNH", "XOM", "CVX", "WMT", "HD", "MCD", "KO", "PEP", "DIS", "V",
+    "MA", "PYPL", "ADBE", "CSCO", "QCOM", "TXN", "AVGO", "MU", "IBM",
+    "BA", "CAT", "GE", "F", "GM", "T", "VZ", "CMCSA", "AMGN",
+    "GILD", "LLY", "BMY", "ABT", "NOW",
+]
 
 
-def _safe_float(val: Any, cap: Optional[float] = None) -> Optional[float]:
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+def _safe(val: Any, default=None) -> Any:
+    """Return val if it's not None/NaN, otherwise default."""
+    if val is None:
+        return default
     try:
-        f = float(val)
-        if math.isnan(f) or math.isinf(f):
-            return None
-        if cap is not None:
-            f = max(-cap, min(cap, f))
-        return f
+        if pd.isna(val):
+            return default
+    except (TypeError, ValueError):
+        pass
+    return val
+
+
+def _pct(val: Any) -> Optional[float]:
+    """Convert a ratio to percentage, handle None/NaN."""
+    v = _safe(val)
+    if v is None:
+        return None
+    try:
+        return round(float(v) * 100, 2)
     except (TypeError, ValueError):
         return None
 
 
-def _info_get(info: Dict, *keys, cap: Optional[float] = None) -> Optional[float]:
-    """Try multiple possible key names for a yfinance info field."""
-    for k in keys:
-        v = info.get(k)
-        if v is not None and v != "N/A":
-            return _safe_float(v, cap=cap)
+def _fmt(val: Any, decimals: int = 2) -> Optional[float]:
+    """Safely round a value to N decimals."""
+    v = _safe(val)
+    if v is None:
+        return None
+    try:
+        return round(float(v), decimals)
+    except (TypeError, ValueError):
+        return None
+
+
+def _get_row(df: pd.DataFrame, *labels: str) -> Optional[pd.Series]:
+    """Try multiple label variants to retrieve a row from a DataFrame."""
+    if df is None or df.empty:
+        return None
+    for label in labels:
+        if label in df.index:
+            return df.loc[label]
+    # Case-insensitive fallback
+    idx_lower = {str(i).lower(): i for i in df.index}
+    for label in labels:
+        key = idx_lower.get(label.lower())
+        if key is not None:
+            return df.loc[key]
     return None
 
 
-class FundamentalAnalyzer:
-    """Analyzes fundamental data for a given ticker using yfinance."""
+def _latest(series: Optional[pd.Series]) -> Optional[float]:
+    """Return the most-recent non-NaN value from a series (columns = years)."""
+    if series is None:
+        return None
+    vals = series.dropna()
+    if vals.empty:
+        return None
+    return float(vals.iloc[0])
 
-    def _fetch_info(self, ticker: str) -> Dict:
-        key = f"fundamental:info:{ticker.upper()}"
-        cached = _cache.get(key, CACHE_TTL)
-        if cached is not None:
-            return cached
+
+def _two_years(series: Optional[pd.Series]) -> tuple[Optional[float], Optional[float]]:
+    """Return (latest, prior_year) values from a financial time series."""
+    if series is None:
+        return None, None
+    vals = series.dropna()
+    curr = float(vals.iloc[0]) if len(vals) > 0 else None
+    prior = float(vals.iloc[1]) if len(vals) > 1 else None
+    return curr, prior
+
+
+def _yoy_growth(curr: Optional[float], prior: Optional[float]) -> Optional[float]:
+    if curr is None or prior is None or prior == 0:
+        return None
+    return round(((curr - prior) / abs(prior)) * 100, 2)
+
+
+def _cagr(curr: Optional[float], base: Optional[float], years: int) -> Optional[float]:
+    if curr is None or base is None or base <= 0 or years <= 0:
+        return None
+    try:
+        return round(((curr / base) ** (1 / years) - 1) * 100, 2)
+    except (ZeroDivisionError, ValueError):
+        return None
+
+
+# ─── Valuation ────────────────────────────────────────────────────────────────
+
+def get_valuation(ticker: str) -> dict:
+    cache_key = f"fundamental_valuation_{ticker}"
+    cached = _cache.get(cache_key, ttl=CACHE_TTL)
+    if cached:
+        return cached
+
+    try:
+        t = yf.Ticker(ticker)
+        info = t.info or {}
+        cashflow = t.cashflow
+
+        pe = _safe(info.get("trailingPE")) or _safe(info.get("forwardPE"))
+        pb = _safe(info.get("priceToBook"))
+        ps = _safe(info.get("priceToSalesTrailingTwelveMonths"))
+        ev_ebitda = _safe(info.get("enterpriseToEbitda"))
+        market_cap = _safe(info.get("marketCap"))
+        enterprise_value = _safe(info.get("enterpriseValue"))
+        current_price = _safe(info.get("currentPrice")) or _safe(info.get("regularMarketPrice"))
+
+        # Graham Number: sqrt(22.5 × EPS × BVPS)
+        graham_number = None
         try:
-            t = yf.Ticker(ticker.upper())
-            info = t.info or {}
-            _cache.set(key, info)
-            return info
+            eps = _safe(info.get("trailingEps")) or _safe(info.get("forwardEps"))
+            bvps = _safe(info.get("bookValue"))
+            if eps is not None and bvps is not None and eps > 0 and bvps > 0:
+                graham_number = round(math.sqrt(22.5 * float(eps) * float(bvps)), 2)
+        except Exception:
+            pass
+
+        # Simple 5-year DCF estimate
+        dcf_estimate = None
+        dcf_range_low = None
+        dcf_range_high = None
+        try:
+            # Get FCF from cash flow statement
+            fcf_row = _get_row(cashflow,
+                "Free Cash Flow", "FreeCashFlow",
+                "Capital Expenditures",  # fallback: will compute below
+            )
+
+            # Prefer direct FCF; otherwise compute from Operating CF - Capex
+            fcf = None
+            ocf_row = _get_row(cashflow, "Operating Cash Flow", "Cash Flow From Operations",
+                                "Net Cash Provided By Operating Activities")
+            capex_row = _get_row(cashflow, "Capital Expenditure", "Capital Expenditures",
+                                  "Purchase Of Ppe", "Purchases Of Property Plant And Equipment")
+
+            if fcf_row is not None:
+                fcf = _latest(fcf_row)
+            if fcf is None and ocf_row is not None and capex_row is not None:
+                ocf = _latest(ocf_row)
+                capex = _latest(capex_row)
+                if ocf is not None and capex is not None:
+                    fcf = ocf - abs(capex)
+
+            revenue_growth = _safe(info.get("revenueGrowth"))
+            g = float(revenue_growth) if revenue_growth is not None else 0.05
+            g = max(-0.2, min(g, 0.25))   # clamp to reasonable range
+            g_terminal = 0.03
+            discount_rate = 0.10
+            shares = _safe(info.get("sharesOutstanding"))
+
+            if fcf and fcf > 0 and shares and shares > 0:
+                # Sum of PV of FCFs over 5 years + terminal value
+                pv_sum = 0.0
+                cf = float(fcf)
+                for yr in range(1, 6):
+                    cf = cf * (1 + g)
+                    pv_sum += cf / ((1 + discount_rate) ** yr)
+                # Terminal value (Gordon Growth)
+                terminal_cf = cf * (1 + g_terminal)
+                terminal_value = terminal_cf / (discount_rate - g_terminal)
+                terminal_pv = terminal_value / ((1 + discount_rate) ** 5)
+                total_value = pv_sum + terminal_pv
+                dcf_per_share = round(total_value / float(shares), 2)
+                dcf_estimate = dcf_per_share
+                dcf_range_low = round(dcf_per_share * 0.80, 2)
+                dcf_range_high = round(dcf_per_share * 1.20, 2)
         except Exception as e:
-            logger.warning(f"FundamentalAnalyzer._fetch_info({ticker}): {e}")
-            return {}
+            logger.debug(f"DCF failed for {ticker}: {e}")
 
-    def get_overview(self, ticker: str) -> Dict:
-        """
-        Return fundamental overview using yfinance ticker.info.
-        """
-        cache_key = f"fundamental:overview:{ticker.upper()}"
-        cached = _cache.get(cache_key, CACHE_TTL)
-        if cached is not None:
-            return cached
+        # Compute Graham discount/premium vs current price
+        graham_vs_price = None
+        if graham_number and current_price and current_price > 0:
+            pct_diff = round(((current_price - graham_number) / graham_number) * 100, 1)
+            graham_vs_price = pct_diff  # positive = above Graham, negative = below
 
-        info = self._fetch_info(ticker)
+        description = info.get("longBusinessSummary", "")
+        if description:
+            description = description[:300]
 
         result = {
             "ticker": ticker.upper(),
-            "sector": info.get("sector"),
-            "industry": info.get("industry"),
-            "market_cap": _info_get(info, "marketCap"),
-            "enterprise_value": _info_get(info, "enterpriseValue"),
-            "pe_ratio": _info_get(info, "trailingPE", cap=_FLOAT_CAPS["pe_ratio"]),
-            "forward_pe": _info_get(info, "forwardPE", cap=_FLOAT_CAPS["forward_pe"]),
-            "peg_ratio": _info_get(info, "pegRatio", cap=_FLOAT_CAPS["peg_ratio"]),
-            "eps_ttm": _info_get(info, "trailingEps"),
-            "eps_forward": _info_get(info, "forwardEps"),
-            "revenue_ttm": _info_get(info, "totalRevenue"),
-            "revenue_growth": _info_get(info, "revenueGrowth", cap=_FLOAT_CAPS["revenue_growth"]),
-            "profit_margin": _info_get(info, "profitMargins", cap=_FLOAT_CAPS["profit_margin"]),
-            "operating_margin": _info_get(info, "operatingMargins", cap=_FLOAT_CAPS["operating_margin"]),
-            "roe": _info_get(info, "returnOnEquity", cap=_FLOAT_CAPS["roe"]),
-            "roa": _info_get(info, "returnOnAssets", cap=_FLOAT_CAPS["roa"]),
-            "debt_to_equity": _info_get(info, "debtToEquity", cap=_FLOAT_CAPS["debt_to_equity"]),
-            "current_ratio": _info_get(info, "currentRatio", cap=_FLOAT_CAPS["current_ratio"]),
-            "quick_ratio": _info_get(info, "quickRatio", cap=_FLOAT_CAPS["quick_ratio"]),
-            "beta": _info_get(info, "beta", cap=_FLOAT_CAPS["beta"]),
-            "52w_high": _info_get(info, "fiftyTwoWeekHigh"),
-            "52w_low": _info_get(info, "fiftyTwoWeekLow"),
-            "current_price": _info_get(info, "currentPrice", "regularMarketPrice"),
-            "analyst_target_price": _info_get(info, "targetMeanPrice", "targetPrice"),
-            "recommendation_mean": _info_get(info, "recommendationMean"),
-            "number_of_analysts": _safe_float(info.get("numberOfAnalystOpinions") or info.get("numAnalystOpinions")),
+            "name": _safe(info.get("shortName") or info.get("longName"), ticker.upper()),
+            "sector": _safe(info.get("sector")),
+            "industry": _safe(info.get("industry")),
+            "description": description or None,
+            "current_price": _fmt(current_price),
+            "market_cap": market_cap,
+            "enterprise_value": enterprise_value,
+            "pe_ratio": _fmt(pe),
+            "pb_ratio": _fmt(pb),
+            "ps_ratio": _fmt(ps),
+            "ev_ebitda": _fmt(ev_ebitda),
+            "graham_number": graham_number,
+            "graham_vs_price_pct": graham_vs_price,
+            "dcf_estimate": dcf_estimate,
+            "dcf_range_low": dcf_range_low,
+            "dcf_range_high": dcf_range_high,
+            "dcf_note": "Simple 5-year DCF — rough estimate only. Uses trailing FCF, revenue growth rate, 10% discount, 3% terminal.",
         }
 
         _cache.set(cache_key, result)
         return result
 
-    def get_health_score(self, ticker: str) -> Dict:
-        """
-        Compute financial health score (0-100) across four components.
-        """
-        cache_key = f"fundamental:health:{ticker.upper()}"
-        cached = _cache.get(cache_key, CACHE_TTL)
-        if cached is not None:
-            return cached
+    except Exception as e:
+        logger.error(f"Valuation failed for {ticker}: {e}")
+        return {"ticker": ticker.upper(), "error": str(e)}
 
-        overview = self.get_overview(ticker)
 
-        profit_margin = overview.get("profit_margin")
-        revenue_growth = overview.get("revenue_growth")
-        debt_to_equity = overview.get("debt_to_equity")
-        forward_pe = overview.get("forward_pe")
+# ─── Growth ───────────────────────────────────────────────────────────────────
 
-        # --- Profitability (0-25) ---
-        if profit_margin is not None:
-            if profit_margin > 0.20:
-                profitability = 25
-            elif profit_margin > 0.10:
-                profitability = 18
-            elif profit_margin > 0.05:
-                profitability = 12
-            elif profit_margin > 0.0:
-                profitability = 6
+def get_growth(ticker: str) -> dict:
+    cache_key = f"fundamental_growth_{ticker}"
+    cached = _cache.get(cache_key, ttl=CACHE_TTL)
+    if cached:
+        return cached
+
+    try:
+        t = yf.Ticker(ticker)
+        info = t.info or {}
+        financials = t.financials  # annual income statement (columns = years, most recent first)
+
+        # Revenue
+        rev_row = _get_row(financials, "Total Revenue", "Revenue", "TotalRevenue")
+        rev_curr, rev_prior = _two_years(rev_row)
+        rev_4yr = None
+        if rev_row is not None:
+            vals = rev_row.dropna()
+            if len(vals) >= 4:
+                rev_4yr = float(vals.iloc[3])
+        rev_yoy = _yoy_growth(rev_curr, rev_prior)
+        rev_3y_cagr = _cagr(rev_curr, rev_4yr, 3) if rev_4yr else None
+
+        # Build revenue history for chart (last 4 years)
+        revenue_history = []
+        if rev_row is not None:
+            vals = rev_row.dropna()
+            for i, (col, val) in enumerate(vals.items()):
+                if i >= 4:
+                    break
+                try:
+                    year = str(col)[:4]
+                    revenue_history.append({"year": year, "revenue": float(val)})
+                except Exception:
+                    pass
+            revenue_history.reverse()  # oldest first
+
+        # Earnings (Net Income)
+        ni_row = _get_row(financials, "Net Income", "Net Income Common Stockholders",
+                           "NetIncome", "Net Income Applicable To Common Shares")
+        ni_curr, ni_prior = _two_years(ni_row)
+        earnings_yoy = _yoy_growth(ni_curr, ni_prior)
+
+        # Gross Margin
+        gross_profit_row = _get_row(financials, "Gross Profit", "GrossProfit")
+        gp_curr = _latest(gross_profit_row)
+        gross_margin = None
+        if gp_curr is not None and rev_curr is not None and rev_curr != 0:
+            gross_margin = round((gp_curr / rev_curr) * 100, 2)
+
+        # Margins from info
+        operating_margin = _pct(info.get("operatingMargins"))
+        net_margin = _pct(info.get("profitMargins"))
+
+        # FCF Yield
+        fcf_yield = None
+        try:
+            cashflow = t.cashflow
+            ocf_row = _get_row(cashflow, "Operating Cash Flow", "Cash Flow From Operations",
+                                 "Net Cash Provided By Operating Activities")
+            capex_row = _get_row(cashflow, "Capital Expenditure", "Capital Expenditures",
+                                   "Purchase Of Ppe", "Purchases Of Property Plant And Equipment")
+            fcf_direct = _get_row(cashflow, "Free Cash Flow", "FreeCashFlow")
+
+            fcf = None
+            if fcf_direct is not None:
+                fcf = _latest(fcf_direct)
+            if fcf is None and ocf_row is not None and capex_row is not None:
+                ocf = _latest(ocf_row)
+                capex = _latest(capex_row)
+                if ocf is not None and capex is not None:
+                    fcf = ocf - abs(capex)
+
+            mktcap = _safe(info.get("marketCap"))
+            if fcf is not None and mktcap and mktcap > 0:
+                fcf_yield = round((float(fcf) / float(mktcap)) * 100, 2)
+        except Exception as e:
+            logger.debug(f"FCF yield failed for {ticker}: {e}")
+
+        # Growth score (0–100)
+        score_components = []
+
+        def score_metric(val, thresholds: list[tuple[float, float]]) -> float:
+            """Map val to a 0-100 score using linear thresholds."""
+            if val is None:
+                return 50.0  # neutral when unknown
+            for threshold, pts in thresholds:
+                if val >= threshold:
+                    return pts
+            return 0.0
+
+        score_components.append(score_metric(rev_yoy, [(20, 100), (10, 80), (5, 60), (0, 40), (-5, 20)]))
+        score_components.append(score_metric(rev_3y_cagr, [(20, 100), (10, 80), (5, 60), (0, 40)]))
+        score_components.append(score_metric(earnings_yoy, [(25, 100), (10, 80), (0, 60), (-10, 30)]))
+        score_components.append(score_metric(gross_margin, [(60, 100), (40, 80), (25, 60), (10, 40)]))
+        score_components.append(score_metric(net_margin, [(20, 100), (10, 80), (5, 60), (0, 40)]))
+        score_components.append(score_metric(fcf_yield, [(5, 100), (2, 70), (0, 50)]))
+
+        growth_score = round(sum(score_components) / len(score_components))
+
+        result = {
+            "ticker": ticker.upper(),
+            "revenue_growth_yoy": rev_yoy,
+            "revenue_growth_3y_cagr": rev_3y_cagr,
+            "earnings_growth_yoy": earnings_yoy,
+            "gross_margin": gross_margin,
+            "operating_margin": operating_margin,
+            "net_margin": net_margin,
+            "fcf_yield": fcf_yield,
+            "growth_score": growth_score,
+            "revenue_history": revenue_history,
+        }
+
+        _cache.set(cache_key, result)
+        return result
+
+    except Exception as e:
+        logger.error(f"Growth failed for {ticker}: {e}")
+        return {"ticker": ticker.upper(), "error": str(e)}
+
+
+# ─── Quality ──────────────────────────────────────────────────────────────────
+
+def get_quality(ticker: str) -> dict:
+    cache_key = f"fundamental_quality_{ticker}"
+    cached = _cache.get(cache_key, ttl=CACHE_TTL)
+    if cached:
+        return cached
+
+    try:
+        t = yf.Ticker(ticker)
+        info = t.info or {}
+        financials = t.financials
+        balance_sheet = t.balance_sheet
+        cashflow = t.cashflow
+
+        roe = _pct(info.get("returnOnEquity"))
+        roa = _pct(info.get("returnOnAssets"))
+        debt_to_equity = _fmt(info.get("debtToEquity"))
+        current_ratio = _fmt(info.get("currentRatio"))
+        quick_ratio = _fmt(info.get("quickRatio"))
+
+        # ROIC: (Net Income - Dividends) / (Total Equity + Long-Term Debt)
+        roic = None
+        try:
+            ni_row = _get_row(financials, "Net Income", "Net Income Common Stockholders", "NetIncome")
+            ni = _latest(ni_row)
+
+            # Dividends paid
+            div_row = _get_row(cashflow, "Cash Dividends Paid", "Dividends Paid",
+                                "Payment Of Dividends", "Common Stock Dividend Paid")
+            div = _latest(div_row)
+            div = abs(float(div)) if div is not None else 0
+
+            # Total equity
+            eq_row = _get_row(balance_sheet,
+                "Total Stockholders Equity", "Total Equity", "Common Stock Equity",
+                "Stockholders Equity", "Total Equity Gross Minority Interest")
+            eq = _latest(eq_row)
+
+            # Long-term debt
+            ltd_row = _get_row(balance_sheet,
+                "Long Term Debt", "LongTermDebt",
+                "Long-Term Debt", "Long Term Debt And Capital Lease Obligation")
+            ltd = _latest(ltd_row)
+            ltd = float(ltd) if ltd is not None else 0
+
+            if ni is not None and eq is not None and (float(eq) + ltd) != 0:
+                roic = round(((float(ni) - div) / (float(eq) + ltd)) * 100, 2)
+        except Exception as e:
+            logger.debug(f"ROIC failed for {ticker}: {e}")
+
+        # Interest Coverage: EBIT / Interest Expense
+        interest_coverage = None
+        try:
+            ebit_row = _get_row(financials, "EBIT", "Ebit",
+                                  "Earnings Before Interest And Taxes")
+            ebit = _latest(ebit_row)
+
+            int_row = _get_row(financials, "Interest Expense", "InterestExpense",
+                                "Interest Expense Non Operating", "Net Interest Income")
+            int_exp = _latest(int_row)
+
+            if ebit is not None and int_exp is not None and int_exp != 0:
+                interest_coverage = round(float(ebit) / abs(float(int_exp)), 2)
+        except Exception as e:
+            logger.debug(f"Interest coverage failed for {ticker}: {e}")
+
+        # ── Altman Z-Score ────────────────────────────────────────────────────
+        altman_z = None
+        altman_zone = None
+        try:
+            # Working Capital = Current Assets - Current Liabilities
+            ca_row = _get_row(balance_sheet, "Current Assets", "Total Current Assets",
+                               "CurrentAssets")
+            cl_row = _get_row(balance_sheet, "Current Liabilities", "Total Current Liabilities",
+                               "CurrentLiabilities")
+            ca = _latest(ca_row)
+            cl = _latest(cl_row)
+            wc = (float(ca) - float(cl)) if ca is not None and cl is not None else None
+
+            # Total Assets
+            ta_row = _get_row(balance_sheet, "Total Assets", "TotalAssets")
+            ta = _latest(ta_row)
+
+            # Retained Earnings
+            re_row = _get_row(balance_sheet, "Retained Earnings", "RetainedEarnings",
+                               "Retained Earnings Accumulated Deficit")
+            retained = _latest(re_row)
+
+            # EBIT
+            ebit_row = _get_row(financials, "EBIT", "Ebit",
+                                  "Earnings Before Interest And Taxes")
+            ebit_az = _latest(ebit_row)
+
+            # Market Value of Equity
+            mve = _safe(info.get("marketCap"))
+
+            # Total Liabilities
+            tl_row = _get_row(balance_sheet, "Total Liabilities Net Minority Interest",
+                               "Total Liabilities", "TotalLiabilities",
+                               "Total Liab", "Total Liabilities And Minority Interest")
+            tl = _latest(tl_row)
+
+            # Sales = Total Revenue
+            rev_row2 = _get_row(financials, "Total Revenue", "Revenue", "TotalRevenue")
+            sales = _latest(rev_row2)
+
+            if all(v is not None for v in [wc, ta, retained, ebit_az, mve, tl, sales]) and float(ta) != 0:
+                ta_f = float(ta)
+                X1 = float(wc) / ta_f
+                X2 = float(retained) / ta_f
+                X3 = float(ebit_az) / ta_f
+                X4 = float(mve) / float(tl) if float(tl) != 0 else 0
+                X5 = float(sales) / ta_f
+                altman_z = round(1.2 * X1 + 1.4 * X2 + 3.3 * X3 + 0.6 * X4 + 1.0 * X5, 2)
+                if altman_z > 2.99:
+                    altman_zone = "Safe"
+                elif altman_z >= 1.81:
+                    altman_zone = "Grey Zone"
+                else:
+                    altman_zone = "Distress"
+        except Exception as e:
+            logger.debug(f"Altman Z failed for {ticker}: {e}")
+
+        # ── Piotroski F-Score ─────────────────────────────────────────────────
+        piotroski_score = None
+        piotroski_detail = {}
+        try:
+            # --- Profitability (4 pts) ---
+            # F1: Positive Net Income
+            ni_row2 = _get_row(financials, "Net Income", "Net Income Common Stockholders", "NetIncome")
+            ni_curr = _latest(ni_row2)
+            f1 = 1 if (ni_curr is not None and ni_curr > 0) else 0
+            piotroski_detail["positive_net_income"] = bool(f1)
+
+            # F2: Positive ROA
+            roa_raw = _safe(info.get("returnOnAssets"))
+            f2 = 1 if (roa_raw is not None and float(roa_raw) > 0) else 0
+            piotroski_detail["positive_roa"] = bool(f2)
+
+            # F3: Positive Operating Cash Flow
+            ocf_row = _get_row(cashflow, "Operating Cash Flow", "Cash Flow From Operations",
+                                 "Net Cash Provided By Operating Activities")
+            ocf = _latest(ocf_row)
+            f3 = 1 if (ocf is not None and ocf > 0) else 0
+            piotroski_detail["positive_ocf"] = bool(f3)
+
+            # F4: OCF > Net Income (accruals)
+            f4 = 1 if (ocf is not None and ni_curr is not None and ocf > ni_curr) else 0
+            piotroski_detail["ocf_gt_net_income"] = bool(f4)
+
+            # --- Leverage/Liquidity (3 pts) ---
+            # F5: Decreasing long-term debt ratio
+            ta_f2 = float(ta) if ta is not None else None
+            ltd_row2 = _get_row(balance_sheet, "Long Term Debt", "LongTermDebt",
+                                  "Long-Term Debt", "Long Term Debt And Capital Lease Obligation")
+            ltd_series = ltd_row2 if ltd_row2 is not None else None
+            ltd_curr2, ltd_prior2 = _two_years(ltd_series)
+            ta_row2 = _get_row(balance_sheet, "Total Assets", "TotalAssets")
+            ta_series = ta_row2 if ta_row2 is not None else None
+            ta_curr2, ta_prior2 = _two_years(ta_series)
+
+            f5 = 0
+            if (ltd_curr2 is not None and ltd_prior2 is not None
+                    and ta_curr2 is not None and ta_prior2 is not None
+                    and ta_curr2 > 0 and ta_prior2 > 0):
+                leverage_curr = ltd_curr2 / ta_curr2
+                leverage_prior = ltd_prior2 / ta_prior2
+                f5 = 1 if leverage_curr < leverage_prior else 0
+            piotroski_detail["decreasing_leverage"] = bool(f5)
+
+            # F6: Improving current ratio
+            curr_ratio_raw = _safe(info.get("currentRatio"))
+            # We'd need prior period current ratio; use yoy from balance sheet
+            ca_series = _get_row(balance_sheet, "Current Assets", "Total Current Assets", "CurrentAssets")
+            cl_series = _get_row(balance_sheet, "Current Liabilities", "Total Current Liabilities", "CurrentLiabilities")
+            ca_curr2, ca_prior2 = _two_years(ca_series)
+            cl_curr2, cl_prior2 = _two_years(cl_series)
+
+            f6 = 0
+            if all(v is not None and v != 0 for v in [ca_curr2, cl_curr2, ca_prior2, cl_prior2]):
+                cr_curr2 = ca_curr2 / cl_curr2
+                cr_prior2 = ca_prior2 / cl_prior2
+                f6 = 1 if cr_curr2 > cr_prior2 else 0
+            piotroski_detail["improving_current_ratio"] = bool(f6)
+
+            # F7: No new share dilution
+            shares_row = _get_row(balance_sheet,
+                "Common Stock", "Ordinary Shares Number",
+                "Share Issued", "Shares Issued")
+            sh_curr, sh_prior = _two_years(shares_row)
+            # Fallback: use sharesOutstanding from info
+            f7 = 1  # default to pass if can't determine
+            if sh_curr is not None and sh_prior is not None and sh_prior > 0:
+                f7 = 1 if sh_curr <= sh_prior * 1.02 else 0  # allow 2% tolerance
+            piotroski_detail["no_share_dilution"] = bool(f7)
+
+            # --- Operating Efficiency (2 pts) ---
+            # F8: Improving gross margin
+            gp_row = _get_row(financials, "Gross Profit", "GrossProfit")
+            rev_row3 = _get_row(financials, "Total Revenue", "Revenue", "TotalRevenue")
+            gp_curr2, gp_prior2 = _two_years(gp_row)
+            rev_curr2, rev_prior2 = _two_years(rev_row3)
+
+            f8 = 0
+            if (gp_curr2 is not None and rev_curr2 is not None and rev_curr2 > 0
+                    and gp_prior2 is not None and rev_prior2 is not None and rev_prior2 > 0):
+                gm_curr = gp_curr2 / rev_curr2
+                gm_prior = gp_prior2 / rev_prior2
+                f8 = 1 if gm_curr > gm_prior else 0
+            piotroski_detail["improving_gross_margin"] = bool(f8)
+
+            # F9: Improving asset turnover
+            f9 = 0
+            if (sales is not None and ta is not None and ta > 0
+                    and rev_prior2 is not None and ta_prior2 is not None and ta_prior2 > 0):
+                at_curr = float(sales) / float(ta)
+                at_prior = float(rev_prior2) / float(ta_prior2)
+                f9 = 1 if at_curr > at_prior else 0
+            piotroski_detail["improving_asset_turnover"] = bool(f9)
+
+            piotroski_score = f1 + f2 + f3 + f4 + f5 + f6 + f7 + f8 + f9
+
+        except Exception as e:
+            logger.debug(f"Piotroski failed for {ticker}: {e}")
+
+        # Quality score (0–100)
+        def qs(val, thresholds):
+            if val is None:
+                return 50.0
+            for threshold, pts in thresholds:
+                if val >= threshold:
+                    return pts
+            return 0.0
+
+        score_parts = [
+            qs(roe, [(20, 100), (15, 80), (10, 60), (5, 40), (0, 20)]),
+            qs(roic, [(15, 100), (10, 80), (5, 60), (0, 40)]),
+            qs(current_ratio, [(2, 100), (1.5, 80), (1, 60), (0.75, 30)]),
+            qs(interest_coverage, [(5, 100), (3, 80), (2, 60), (1, 30)]),
+        ]
+
+        if altman_z is not None:
+            if altman_z > 2.99:
+                score_parts.append(100.0)
+            elif altman_z >= 1.81:
+                score_parts.append(50.0)
             else:
-                profitability = 0
-        else:
-            profitability = 10  # neutral when unknown
+                score_parts.append(10.0)
 
-        # --- Growth (0-25) ---
-        if revenue_growth is not None:
-            if revenue_growth > 0.15:
-                growth = 25
-            elif revenue_growth > 0.08:
-                growth = 18
-            elif revenue_growth > 0.03:
-                growth = 12
-            elif revenue_growth > 0.0:
-                growth = 6
-            else:
-                growth = 0
-        else:
-            growth = 10
+        if piotroski_score is not None:
+            score_parts.append(round((piotroski_score / 9) * 100))
 
-        # --- Balance Sheet (0-25) ---
         if debt_to_equity is not None:
-            # yfinance often returns D/E as a raw ratio
-            de = debt_to_equity
-            if de < 0.5:
-                balance_sheet = 25
-            elif de < 1.0:
-                balance_sheet = 18
-            elif de < 2.0:
-                balance_sheet = 12
-            elif de < 3.0:
-                balance_sheet = 6
+            if debt_to_equity < 50:
+                score_parts.append(100.0)
+            elif debt_to_equity < 100:
+                score_parts.append(70.0)
+            elif debt_to_equity < 200:
+                score_parts.append(40.0)
             else:
-                balance_sheet = 0
-        else:
-            balance_sheet = 10
+                score_parts.append(10.0)
 
-        # --- Valuation (0-25) ---
-        if forward_pe is not None and forward_pe > 0:
-            if forward_pe < 15:
-                valuation = 25
-            elif forward_pe < 20:
-                valuation = 20
-            elif forward_pe < 30:
-                valuation = 14
-            elif forward_pe < 50:
-                valuation = 8
-            else:
-                valuation = 0
-        else:
-            valuation = 10
-
-        overall_score = float(profitability + growth + balance_sheet + valuation)
-
-        if overall_score >= 70:
-            signal = "strong"
-        elif overall_score >= 50:
-            signal = "good"
-        elif overall_score >= 30:
-            signal = "fair"
-        else:
-            signal = "weak"
-
-        explanation_parts = []
-        pm_str = f"{profit_margin*100:.1f}%" if profit_margin is not None else "N/A"
-        rg_str = f"{revenue_growth*100:.1f}%" if revenue_growth is not None else "N/A"
-        de_str = f"{debt_to_equity:.2f}" if debt_to_equity is not None else "N/A"
-        pe_str = f"{forward_pe:.1f}x" if forward_pe is not None else "N/A"
-        explanation_parts.append(
-            f"Overall health: {overall_score:.0f}/100 ({signal}). "
-            f"Profitability: {profitability}/25 (margin {pm_str}), "
-            f"Growth: {growth}/25 (rev growth {rg_str}), "
-            f"Balance sheet: {balance_sheet}/25 (D/E {de_str}), "
-            f"Valuation: {valuation}/25 (fwd PE {pe_str})."
-        )
+        quality_score = round(sum(score_parts) / len(score_parts)) if score_parts else 50
 
         result = {
             "ticker": ticker.upper(),
-            "overall_score": overall_score,
-            "components": {
-                "profitability": profitability,
-                "growth": growth,
-                "balance_sheet": balance_sheet,
-                "valuation": valuation,
-            },
-            "signal": signal,
-            "explanation": " ".join(explanation_parts),
+            "roe": roe,
+            "roa": roa,
+            "roic": roic,
+            "debt_to_equity": debt_to_equity,
+            "current_ratio": current_ratio,
+            "quick_ratio": quick_ratio,
+            "interest_coverage": interest_coverage,
+            "altman_z_score": altman_z,
+            "altman_zone": altman_zone,
+            "piotroski_f_score": piotroski_score,
+            "piotroski_detail": piotroski_detail,
+            "quality_score": quality_score,
         }
 
         _cache.set(cache_key, result)
         return result
 
-    def get_signals(self, ticker: str) -> List[Dict]:
-        """
-        Return fundamental signals for composite scoring.
-        """
-        cache_key = f"fundamental:signals:{ticker.upper()}"
-        cached = _cache.get(cache_key, CACHE_TTL)
-        if cached is not None:
-            return cached
+    except Exception as e:
+        logger.error(f"Quality failed for {ticker}: {e}")
+        return {"ticker": ticker.upper(), "error": str(e)}
 
-        try:
-            overview = self.get_overview(ticker)
-            health = self.get_health_score(ticker)
-            signals: List[Dict] = []
 
-            current_price = overview.get("current_price")
-            analyst_target = overview.get("analyst_target_price")
-            forward_pe = overview.get("forward_pe")
-            revenue_growth = overview.get("revenue_growth")
-            profit_margin = overview.get("profit_margin")
-            health_score = health.get("overall_score", 50.0)
+# ─── Overview (combined) ──────────────────────────────────────────────────────
 
-            # 1. Analyst Price Target Upside
-            if current_price and analyst_target and current_price > 0:
-                upside = (analyst_target / current_price) - 1.0
-                if upside > 0.10:
-                    strength = round(min(upside / 0.30, 0.90), 4)
-                    signals.append({
-                        "name": "Analyst Price Target Upside",
-                        "category": "fundamental",
-                        "direction": "bullish",
-                        "strength": strength,
-                        "value": round(analyst_target, 2),
-                        "explanation": (
-                            f"Analyst consensus target ${analyst_target:.2f} implies "
-                            f"{upside*100:.1f}% upside from current ${current_price:.2f}."
-                        ),
-                    })
-                elif upside < -0.10:
-                    strength = round(min(abs(upside) / 0.30, 0.90), 4)
-                    signals.append({
-                        "name": "Analyst Price Target Upside",
-                        "category": "fundamental",
-                        "direction": "bearish",
-                        "strength": strength,
-                        "value": round(analyst_target, 2),
-                        "explanation": (
-                            f"Analyst consensus target ${analyst_target:.2f} implies "
-                            f"{abs(upside)*100:.1f}% downside from current ${current_price:.2f}."
-                        ),
-                    })
+def get_overview(ticker: str) -> dict:
+    cache_key = f"fundamental_overview_{ticker}"
+    cached = _cache.get(cache_key, ttl=CACHE_TTL)
+    if cached:
+        return cached
 
-            # 2. Valuation (Forward PE)
-            if forward_pe is not None and forward_pe > 0:
-                if forward_pe < 15:
-                    signals.append({
-                        "name": "Valuation (Forward PE)",
-                        "category": "fundamental",
-                        "direction": "bullish",
-                        "strength": 0.70,
-                        "value": round(forward_pe, 2),
-                        "explanation": (
-                            f"Forward PE of {forward_pe:.1f}x — below 15x; stock appears undervalued "
-                            "relative to earnings power."
-                        ),
-                    })
-                elif forward_pe > 35:
-                    signals.append({
-                        "name": "Valuation (Forward PE)",
-                        "category": "fundamental",
-                        "direction": "bearish",
-                        "strength": 0.65,
-                        "value": round(forward_pe, 2),
-                        "explanation": (
-                            f"Forward PE of {forward_pe:.1f}x — above 35x; elevated valuation increases "
-                            "downside risk in a rising rate environment."
-                        ),
-                    })
+    valuation = get_valuation(ticker)
+    growth = get_growth(ticker)
+    quality = get_quality(ticker)
 
-            # 3. Revenue Growth
-            if revenue_growth is not None:
-                if revenue_growth > 0.10:
-                    signals.append({
-                        "name": "Revenue Growth",
-                        "category": "fundamental",
-                        "direction": "bullish",
-                        "strength": 0.60,
-                        "value": round(revenue_growth, 4),
-                        "explanation": (
-                            f"Revenue growth of {revenue_growth*100:.1f}% — strong top-line momentum "
-                            "supports earnings expansion."
-                        ),
-                    })
-                elif revenue_growth < 0:
-                    signals.append({
-                        "name": "Revenue Growth",
-                        "category": "fundamental",
-                        "direction": "bearish",
-                        "strength": 0.55,
-                        "value": round(revenue_growth, 4),
-                        "explanation": (
-                            f"Revenue declining {abs(revenue_growth)*100:.1f}% — negative top-line growth "
-                            "signals business deterioration."
-                        ),
-                    })
+    result = {
+        "ticker": ticker.upper(),
+        "valuation": valuation,
+        "growth": growth,
+        "quality": quality,
+    }
 
-            # 4. Profit Margin Quality
-            if profit_margin is not None and profit_margin > 0.15:
-                signals.append({
-                    "name": "Profit Margin Quality",
-                    "category": "fundamental",
-                    "direction": "bullish",
-                    "strength": 0.55,
-                    "value": round(profit_margin, 4),
-                    "explanation": (
-                        f"Net profit margin of {profit_margin*100:.1f}% — high-quality earnings "
-                        "with strong operating leverage."
-                    ),
-                })
+    _cache.set(cache_key, result)
+    return result
 
-            # 5. Financial Health Score
-            if health_score > 70:
-                signals.append({
-                    "name": "Financial Health",
-                    "category": "fundamental",
-                    "direction": "bullish",
-                    "strength": 0.60,
-                    "value": round(health_score, 1),
-                    "explanation": (
-                        f"Financial health score of {health_score:.0f}/100 — strong balance sheet, "
-                        "growth, and profitability profile."
-                    ),
-                })
-            elif health_score < 30:
-                signals.append({
-                    "name": "Financial Health",
-                    "category": "fundamental",
-                    "direction": "bearish",
-                    "strength": 0.60,
-                    "value": round(health_score, 1),
-                    "explanation": (
-                        f"Financial health score of {health_score:.0f}/100 — weak fundamentals "
-                        "including potential balance sheet stress or declining margins."
-                    ),
-                })
 
-            _cache.set(cache_key, signals)
-            return signals
+# ─── Screener ─────────────────────────────────────────────────────────────────
 
-        except Exception as e:
-            logger.warning(f"FundamentalAnalyzer.get_signals({ticker}): {e}")
-            return []
+def _screener_fetch_one(ticker: str) -> Optional[dict]:
+    """Fetch minimal data for one ticker for the screener."""
+    try:
+        t = yf.Ticker(ticker)
+        info = t.info or {}
+
+        pe = _safe(info.get("trailingPE")) or _safe(info.get("forwardPE"))
+        roe = _pct(info.get("returnOnEquity"))
+        mktcap = _safe(info.get("marketCap"))
+        profitable = _safe(info.get("profitMargins")) is not None and float(_safe(info.get("profitMargins"), 0)) > 0
+
+        # Quick growth/quality scores
+        rev_growth = _safe(info.get("revenueGrowth"))
+        rev_growth_pct = round(float(rev_growth) * 100, 1) if rev_growth is not None else None
+
+        # Simple scores based on info only (fast)
+        growth_score = 50
+        quality_score = 50
+
+        if rev_growth_pct is not None:
+            if rev_growth_pct > 20:
+                growth_score = 80
+            elif rev_growth_pct > 10:
+                growth_score = 65
+            elif rev_growth_pct > 0:
+                growth_score = 55
+            else:
+                growth_score = 35
+
+        roe_raw = _safe(info.get("returnOnEquity"))
+        if roe_raw is not None:
+            roe_f = float(roe_raw) * 100
+            if roe_f > 20:
+                quality_score = 80
+            elif roe_f > 10:
+                quality_score = 65
+            elif roe_f > 0:
+                quality_score = 50
+            else:
+                quality_score = 25
+
+        # Verdict
+        verdict = "Neutral"
+        if pe is not None and roe_raw is not None:
+            roe_f = float(roe_raw) * 100
+            pe_f = float(pe)
+            if pe_f < 15 and roe_f > 15:
+                verdict = "Strong Buy"
+            elif pe_f < 20 and roe_f > 10:
+                verdict = "Buy"
+            elif pe_f > 30:
+                verdict = "Expensive"
+            elif roe_f < 5:
+                verdict = "Weak"
+
+        return {
+            "ticker": ticker.upper(),
+            "market_cap": mktcap,
+            "pe_ratio": _fmt(pe),
+            "roe": roe,
+            "growth_score": growth_score,
+            "quality_score": quality_score,
+            "revenue_growth_pct": rev_growth_pct,
+            "profitable": profitable,
+            "verdict": verdict,
+        }
+    except Exception as e:
+        logger.debug(f"Screener fetch failed for {ticker}: {e}")
+        return None
+
+
+def get_screener(
+    min_pe: Optional[float] = None,
+    max_pe: Optional[float] = None,
+    min_roe: Optional[float] = None,
+    profitable_only: bool = False,
+    limit: int = 30,
+) -> list[dict]:
+    cache_key = f"fundamental_screener_{min_pe}_{max_pe}_{min_roe}_{profitable_only}"
+    cached = _cache.get(cache_key, ttl=SCREENER_TTL)
+    if cached:
+        return cached[:limit]
+
+    results = []
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = {executor.submit(_screener_fetch_one, t): t for t in SCREENER_UNIVERSE}
+        for future in as_completed(futures):
+            row = future.result()
+            if row is None:
+                continue
+
+            # Apply filters
+            pe = row.get("pe_ratio")
+            roe = row.get("roe")
+            profitable = row.get("profitable", False)
+
+            if min_pe is not None and (pe is None or pe < min_pe):
+                continue
+            if max_pe is not None and (pe is None or pe > max_pe):
+                continue
+            if min_roe is not None and (roe is None or roe < min_roe):
+                continue
+            if profitable_only and not profitable:
+                continue
+
+            results.append(row)
+
+    results.sort(key=lambda r: (r.get("quality_score", 0) + r.get("growth_score", 0)), reverse=True)
+    _cache.set(cache_key, results)
+    return results[:limit]

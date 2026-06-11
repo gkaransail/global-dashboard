@@ -2,11 +2,10 @@ MANIFEST = {
     "id": "sentiment",
     "label": "Market Sentiment",
     "icon": "🧠",
+    "description": "Fear & Greed composite index built from VIX, momentum, options flow, safe haven demand, junk bonds, breadth, and price strength.",
     "status": "live",
-    "description": "News sentiment, analyst ratings, social buzz, and fear/greed indicators",
-    "subOptions": [
-        {"id": "news", "label": "News Sentiment"},
-        {"id": "analysts", "label": "Analyst Ratings"},
-        {"id": "overview", "label": "Sentiment Overview"},
-    ]
+    "api_prefix": "/api/v1/sentiment",
+    "sub_options": [
+        {"id": "dashboard", "label": "Dashboard", "icon": "🧠"},
+    ],
 }

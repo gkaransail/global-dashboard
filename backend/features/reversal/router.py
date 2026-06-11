@@ -14,7 +14,7 @@ async def analyze_single(
     ticker: str,
     explain: bool = Query(False),
     categories: Optional[str] = Query(None),
-    lookback_days: int = Query(90, ge=30, le=365),
+    lookback_days: int = Query(90, ge=7, le=1825),
 ):
     cat_list = [c.strip() for c in categories.split(",")] if categories else None
     try:
@@ -97,6 +97,25 @@ async def get_sector_overview():
             continue
     results.sort(key=lambda r: r["confidence"], reverse=True)
     return results[:10]
+
+
+@router.get("/quote/{ticker}")
+async def get_quote(ticker: str):
+    from core.data.fetcher import fetch_ohlcv
+    df = fetch_ohlcv(ticker.upper(), period="5d")
+    if df is None or df.empty:
+        raise HTTPException(status_code=404, detail=f"No data for {ticker.upper()}")
+    close = df["Close"]
+    price = float(close.iloc[-1])
+    prev = float(close.iloc[-2]) if len(close) >= 2 else price
+    change_abs = price - prev
+    change_pct = (change_abs / prev) * 100 if prev else 0
+    return {
+        "ticker": ticker.upper(),
+        "price": round(price, 2),
+        "change_1d_abs": round(change_abs, 2),
+        "change_1d_pct": round(change_pct, 2),
+    }
 
 
 @router.get("/macro", response_model=dict)

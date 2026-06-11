@@ -1,12 +1,10 @@
 import { Routes, Route, Navigate, NavLink } from 'react-router-dom'
-import InsiderTransactions from './InsiderTransactions'
-import InsiderSentiment from './InsiderSentiment'
-import InsiderSignals from './InsiderSignals'
+import TransactionFeed from './TransactionFeed'
+import ClusterBuys from './ClusterBuys'
 
 const TABS = [
-  { path: 'transactions', label: '📰 Transactions' },
-  { path: 'sentiment',    label: '🎯 Insider Sentiment' },
-  { path: 'signals',      label: '🚦 Buy/Sell Signals' },
+  { path: 'feed',    label: '📋 Transaction Feed' },
+  { path: 'cluster', label: '🎯 Cluster Buys' },
 ]
 
 export default function InsiderFeature() {
@@ -25,10 +23,9 @@ export default function InsiderFeature() {
       </nav>
       <div className="sub-content">
         <Routes>
-          <Route path="transactions" element={<InsiderTransactions />} />
-          <Route path="sentiment"    element={<InsiderSentiment />} />
-          <Route path="signals"      element={<InsiderSignals />} />
-          <Route path="*"            element={<Navigate to="transactions" replace />} />
+          <Route index element={<Navigate to="feed" replace />} />
+          <Route path="feed"    element={<TransactionFeed />} />
+          <Route path="cluster" element={<ClusterBuys />} />
         </Routes>
       </div>
     </div>

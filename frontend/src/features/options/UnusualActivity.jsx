@@ -22,13 +22,29 @@ function ScoreBar({ score }) {
   )
 }
 
+function whatItMeans(a) {
+  const typeStr = a.type === 'call' ? 'call (upside bet)' : 'put (downside bet)'
+  const sizeStr = a.premium_value >= 1_000_000
+    ? `a massive $${(a.premium_value/1_000_000).toFixed(1)}M`
+    : a.premium_value >= 100_000
+    ? `a large $${(a.premium_value/1_000).toFixed(0)}K`
+    : `a $${a.premium_value?.toFixed(0)}`
+  const volStr = a.vol_oi_ratio > 10
+    ? `${a.vol_oi_ratio}× normal volume — extremely unusual`
+    : a.vol_oi_ratio > 3
+    ? `${a.vol_oi_ratio}× normal volume — notably unusual`
+    : `${a.vol_oi_ratio}× normal`
+  return `Someone placed ${sizeStr} ${typeStr} at $${a.strike} expiring ${a.expiration_label} (${a.dte} days). Volume is ${volStr}. This is a ${a.sentiment} bet.`
+}
+
 export default function UnusualActivity() {
   const { ticker } = useStore()
   const [data, setData]       = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError]     = useState(null)
-  const [filter, setFilter]   = useState('all')   // all | call | put
-  const [sortBy, setSortBy]   = useState('score') // score | premium | vol_oi
+  const [filter, setFilter]   = useState('all')
+  const [sortBy, setSortBy]   = useState('score')
+  const [expanded, setExpanded] = useState(null)
 
   useEffect(() => { load() }, [ticker])
 
@@ -77,13 +93,18 @@ export default function UnusualActivity() {
         </div>
       )}
 
+      {/* Plain-English explainer */}
+      <div className="ov-narrative" style={{ marginBottom: 0 }}>
+        <strong>What is unusual activity?</strong> When someone buys significantly more options contracts than usual at a given strike, it suggests a large player — a hedge fund, institution, or informed trader — is making a directional bet. High volume relative to open interest (Vol/OI) is the key signal. These aren't random trades.
+      </div>
+
       {/* Filters */}
       <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
         <div style={{ display: 'flex', gap: 4 }}>
           {['all', 'call', 'put'].map(f => (
             <button key={f} onClick={() => setFilter(f)}
               className={`tf-pill ${filter === f ? 'active' : ''}`}>
-              {f === 'all' ? 'All' : f === 'call' ? '🟢 Calls' : '🔴 Puts'}
+              {f === 'all' ? 'All' : f === 'call' ? '🟢 Calls (bullish bets)' : '🔴 Puts (bearish bets)'}
             </button>
           ))}
         </div>
@@ -107,8 +128,21 @@ export default function UnusualActivity() {
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
               <thead>
                 <tr style={{ background: 'var(--surface2)' }}>
-                  {['Type','Strike','Expiry','DTE','Volume','OI','Vol/OI','IV%','Premium','Sentiment','Score'].map(h => (
-                    <th key={h} style={{ padding: '8px 10px', textAlign: 'left', color: 'var(--muted)', fontSize: 10, textTransform: 'uppercase', letterSpacing: '.5px', borderBottom: '1px solid var(--border)', whiteSpace: 'nowrap' }}>{h}</th>
+                  {[
+                    ['Type',      'Call = upside bet / Put = downside bet'],
+                    ['Strike',    'The price level the bet is made at'],
+                    ['Expiry',    'When this contract expires'],
+                    ['DTE',       'Days until expiration'],
+                    ['Volume',    'Contracts traded today'],
+                    ['OI',        'Total open contracts at this strike'],
+                    ['Vol/OI',    'How unusual is this volume vs existing positions? Higher = more unusual'],
+                    ['IV%',       'Implied Volatility — how expensive this option is'],
+                    ['Premium',   'Total money bet on this contract'],
+                    ['Direction', 'Which way this bet is pointing'],
+                    ['Score',     'How unusual is this trade? Higher = more suspicious / institutional'],
+                  ].map(([h, tip]) => (
+                    <th key={h} style={{ padding: '8px 10px', textAlign: 'left', color: 'var(--muted)', fontSize: 10, textTransform: 'uppercase', letterSpacing: '.5px', borderBottom: '1px solid var(--border)', whiteSpace: 'nowrap' }}
+                      title={tip}>{h} <span style={{ color: 'var(--border-hi)' }}>ⓘ</span></th>
                   ))}
                 </tr>
               </thead>
@@ -116,32 +150,47 @@ export default function UnusualActivity() {
                 {filtered.map((a, i) => {
                   const typeColor = a.type === 'call' ? 'var(--bull)' : 'var(--bear)'
                   const sentColor = a.sentiment === 'bullish' ? 'var(--bull)' : 'var(--bear)'
+                  const isExp = expanded === i
                   return (
-                    <tr key={i}
-                      onMouseEnter={e => e.currentTarget.style.background = 'var(--surface2)'}
-                      onMouseLeave={e => e.currentTarget.style.background = ''}>
-                      <td style={{ padding: '8px 10px', borderBottom: '1px solid var(--border)' }}>
-                        <span style={{ color: typeColor, fontWeight: 700, fontSize: 11 }}>{a.type.toUpperCase()}</span>
-                      </td>
-                      <td style={{ padding: '8px 10px', borderBottom: '1px solid var(--border)', fontWeight: 700 }}>${a.strike}</td>
-                      <td style={{ padding: '8px 10px', borderBottom: '1px solid var(--border)', color: 'var(--muted)' }}>{a.expiration_label}</td>
-                      <td style={{ padding: '8px 10px', borderBottom: '1px solid var(--border)', color: 'var(--muted)' }}>{a.dte}d</td>
-                      <td style={{ padding: '8px 10px', borderBottom: '1px solid var(--border)', color: typeColor, fontWeight: 600 }}>{a.volume?.toLocaleString()}</td>
-                      <td style={{ padding: '8px 10px', borderBottom: '1px solid var(--border)', color: 'var(--muted)' }}>{a.oi?.toLocaleString()}</td>
-                      <td style={{ padding: '8px 10px', borderBottom: '1px solid var(--border)', fontWeight: 700, color: a.vol_oi_ratio > 5 ? 'var(--gold)' : 'var(--text)' }}>
-                        {a.vol_oi_ratio ?? '—'}×
-                      </td>
-                      <td style={{ padding: '8px 10px', borderBottom: '1px solid var(--border)' }}>{a.iv_pct ?? '—'}%</td>
-                      <td style={{ padding: '8px 10px', borderBottom: '1px solid var(--border)', fontWeight: 700 }}>{fmtPrem(a.premium_value)}</td>
-                      <td style={{ padding: '8px 10px', borderBottom: '1px solid var(--border)' }}>
-                        <span style={{ color: sentColor, fontWeight: 700, fontSize: 11 }}>
-                          {a.sentiment === 'bullish' ? '⬆' : '⬇'} {a.sentiment}
-                        </span>
-                      </td>
-                      <td style={{ padding: '8px 10px', borderBottom: '1px solid var(--border)' }}>
-                        <ScoreBar score={a.score} />
-                      </td>
-                    </tr>
+                    <>
+                      <tr key={i} style={{ cursor: 'pointer' }}
+                        onClick={() => setExpanded(isExp ? null : i)}
+                        onMouseEnter={e => e.currentTarget.style.background = 'var(--surface2)'}
+                        onMouseLeave={e => !isExp && (e.currentTarget.style.background = '')}>
+                        <td style={{ padding: '8px 10px', borderBottom: isExp ? 'none' : '1px solid var(--border)' }}>
+                          <span style={{ color: typeColor, fontWeight: 700, fontSize: 11 }}>
+                            {a.type === 'call' ? '🟢' : '🔴'} {a.type.toUpperCase()}
+                          </span>
+                        </td>
+                        <td style={{ padding: '8px 10px', borderBottom: isExp ? 'none' : '1px solid var(--border)', fontWeight: 700 }}>${a.strike}</td>
+                        <td style={{ padding: '8px 10px', borderBottom: isExp ? 'none' : '1px solid var(--border)', color: 'var(--muted)' }}>{a.expiration_label}</td>
+                        <td style={{ padding: '8px 10px', borderBottom: isExp ? 'none' : '1px solid var(--border)', color: 'var(--muted)' }}>{a.dte}d</td>
+                        <td style={{ padding: '8px 10px', borderBottom: isExp ? 'none' : '1px solid var(--border)', color: typeColor, fontWeight: 600 }}>{a.volume?.toLocaleString()}</td>
+                        <td style={{ padding: '8px 10px', borderBottom: isExp ? 'none' : '1px solid var(--border)', color: 'var(--muted)' }}>{a.oi?.toLocaleString()}</td>
+                        <td style={{ padding: '8px 10px', borderBottom: isExp ? 'none' : '1px solid var(--border)', fontWeight: 700, color: a.vol_oi_ratio > 5 ? 'var(--gold)' : 'var(--text)' }}>
+                          {a.vol_oi_ratio ?? '—'}×
+                        </td>
+                        <td style={{ padding: '8px 10px', borderBottom: isExp ? 'none' : '1px solid var(--border)' }}>{a.iv_pct ?? '—'}%</td>
+                        <td style={{ padding: '8px 10px', borderBottom: isExp ? 'none' : '1px solid var(--border)', fontWeight: 700 }}>{fmtPrem(a.premium_value)}</td>
+                        <td style={{ padding: '8px 10px', borderBottom: isExp ? 'none' : '1px solid var(--border)' }}>
+                          <span style={{ color: sentColor, fontWeight: 700, fontSize: 11 }}>
+                            {a.sentiment === 'bullish' ? '⬆ Bullish' : '⬇ Bearish'}
+                          </span>
+                        </td>
+                        <td style={{ padding: '8px 10px', borderBottom: isExp ? 'none' : '1px solid var(--border)' }}>
+                          <ScoreBar score={a.score} />
+                        </td>
+                      </tr>
+                      {isExp && (
+                        <tr key={`exp-${i}`}>
+                          <td colSpan={11} style={{ padding: '0 10px 12px', borderBottom: '1px solid var(--border)', background: 'var(--surface2)' }}>
+                            <div style={{ fontSize: 12, color: 'var(--text-dim)', lineHeight: 1.7, padding: '10px 12px', borderLeft: '3px solid ' + typeColor, borderRadius: '0 6px 6px 0' }}>
+                              💡 <strong style={{ color: 'var(--text)' }}>What this means in plain English:</strong> {whatItMeans(a)}
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </>
                   )
                 })}
               </tbody>
