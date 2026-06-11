@@ -11,6 +11,7 @@ import TechnicalFeature from './features/technical/index'
 import FundamentalFeature from './features/fundamental/index'
 import InsiderFeature from './features/insider/index'
 import AIAgentFeature from './features/ai_agent/index'
+import SentimentAIFeature from './features/sentiment_ai/index'
 import CongressFeature from './features/congress/index'
 import MarketIntelFeature from './features/market_intel/index'
 import InstitutionalFeature from './features/institutional/index'
@@ -35,6 +36,7 @@ export default function App() {
             <Route path="/insider/*"        element={<InsiderFeature />} />
             <Route path="/smart_money/*"    element={<SmartMoneyFeature />} />
             <Route path="/ai_agent/*"       element={<AIAgentFeature />} />
+            <Route path="/sentiment_ai/*"   element={<SentimentAIFeature />} />
             <Route path="/congress/*"       element={<CongressFeature />} />
             <Route path="/market_intel/*"   element={<MarketIntelFeature />} />
             <Route path="/institutional/*"  element={<InstitutionalFeature />} />

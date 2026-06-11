@@ -2,11 +2,13 @@ import { Routes, Route, Navigate, NavLink } from 'react-router-dom'
 import AISummary from './AISummary'
 import DeepResearch from './DeepResearch'
 import ResearchChat from './ResearchChat'
+import Debate from './Debate'
 
 const TABS = [
   { path: 'summary',  label: '📝 AI Summary' },
   { path: 'research', label: '🔬 Deep Research' },
   { path: 'chat',     label: '💬 Research Chat' },
+  { path: 'debate',   label: '⚔ Bull vs Bear' },
 ]
 
 export default function AIAgentFeature() {
@@ -29,6 +31,7 @@ export default function AIAgentFeature() {
           <Route path="summary"  element={<AISummary />} />
           <Route path="research" element={<DeepResearch />} />
           <Route path="chat"     element={<ResearchChat />} />
+          <Route path="debate"   element={<Debate />} />
         </Routes>
       </div>
     </div>

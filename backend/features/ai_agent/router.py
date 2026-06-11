@@ -110,3 +110,17 @@ async def chat(req: ChatRequest):
     if "error" in result:
         return result
     return result
+
+
+@router.post("/debate")
+async def debate(req: SummaryRequest):
+    """
+    Bull vs Bear agent debate.
+    Two Claude agents argue opposite sides; a judge scores conviction (0-100).
+    High conviction = strong signal alignment. Low = conflicting signals, reduce size.
+    """
+    if _api_key_missing():
+        return _NO_KEY_RESPONSE
+
+    from features.ai_agent.debate import run_debate
+    return run_debate(req.ticker)

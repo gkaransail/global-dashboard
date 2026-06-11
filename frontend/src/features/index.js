@@ -98,11 +98,24 @@ export const FEATURES = [
     label: 'AI Research Agent',
     icon: '🤖',
     status: 'live',
-    description: 'AI-powered market research — ticker summaries, deep analysis, and interactive research chat.',
+    description: 'AI-powered market research — ticker summaries, deep analysis, interactive chat, and Bull vs Bear debate.',
     subOptions: [
       { id: 'summary',  label: '📝 AI Summary',    icon: '📝', path: '/ai_agent/summary' },
       { id: 'research', label: '🔬 Deep Research',  icon: '🔬', path: '/ai_agent/research' },
       { id: 'chat',     label: '💬 Research Chat',  icon: '💬', path: '/ai_agent/chat' },
+      { id: 'debate',   label: '⚔ Bull vs Bear',   icon: '⚔',  path: '/ai_agent/debate' },
+    ],
+  },
+  {
+    id: 'sentiment_ai',
+    label: 'AI Sentiment',
+    icon: '🧬',
+    status: 'live',
+    description: 'FinBERT-powered sentiment analysis on news headlines, earnings text, and custom input.',
+    subOptions: [
+      { id: 'news',    label: '📰 News Sentiment', icon: '📰', path: '/sentiment_ai/news' },
+      { id: 'analyze', label: '🧬 Text Analyzer',  icon: '🧬', path: '/sentiment_ai/analyze' },
+      { id: 'compare', label: '⚖ Ticker Compare', icon: '⚖',  path: '/sentiment_ai/compare' },
     ],
   },
   {

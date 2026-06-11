@@ -114,6 +114,40 @@ TOOLS = [
             "required": ["ticker"],
         },
     },
+    {
+        "name": "get_news",
+        "description": (
+            "Fetch the latest news headlines and summaries for a stock ticker. "
+            "Use this to understand recent events, catalysts, or sentiment drivers "
+            "that may not be reflected in price data yet."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "Stock ticker symbol, e.g. AAPL"},
+                "max_items": {"type": "integer", "default": 10, "description": "Number of articles to return (max 15)"},
+            },
+            "required": ["ticker"],
+        },
+    },
+    {
+        "name": "get_news_sentiment",
+        "description": (
+            "Analyze the sentiment of recent news for a ticker using FinBERT, a financial "
+            "NLP model trained specifically on financial text. Returns per-article sentiment "
+            "scores (positive/negative/neutral) and an aggregate bull/bear score. "
+            "Use this alongside price and technical data to understand whether news flow "
+            "is supporting or contradicting the technical signal."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string"},
+                "max_items": {"type": "integer", "default": 10},
+            },
+            "required": ["ticker"],
+        },
+    },
 ]
 
 
@@ -140,6 +174,12 @@ def execute_tool(name: str, inputs: dict) -> str:  # always returns JSON string
 
         if name == "get_insider_activity":
             return _get_insider_activity(ticker)
+
+        if name == "get_news":
+            return _get_news(ticker, inputs.get("max_items", 10))
+
+        if name == "get_news_sentiment":
+            return _get_news_sentiment(ticker, inputs.get("max_items", 10))
 
         return json.dumps({"error": f"Unknown tool: {name}"})
 
@@ -313,11 +353,59 @@ def _get_insider_activity(ticker: str) -> str:
         return json.dumps({"ticker": ticker, "transactions": [], "error": str(e)})
 
 
+def _get_news(ticker: str, max_items: int = 10) -> str:
+    try:
+        from core.news import fetch_ticker_news
+        articles = fetch_ticker_news(ticker, max_items=min(max_items, 15))
+        if not articles:
+            return json.dumps({"ticker": ticker, "articles": [], "message": "No recent news found."})
+        # Return lightweight version — title + summary + source + date
+        lightweight = [
+            {
+                "title":     a["title"],
+                "summary":   a["summary"][:200],
+                "source":    a["source"],
+                "published": a["published"],
+            }
+            for a in articles
+        ]
+        return json.dumps({"ticker": ticker, "article_count": len(lightweight), "articles": lightweight})
+    except Exception as e:
+        return json.dumps({"error": str(e), "ticker": ticker})
+
+
+def _get_news_sentiment(ticker: str, max_items: int = 10) -> str:
+    try:
+        from core.news import fetch_ticker_news
+        from features.sentiment_ai.finbert import analyze_news_articles
+        articles = fetch_ticker_news(ticker, max_items=min(max_items, 15))
+        if not articles:
+            return json.dumps({"ticker": ticker, "message": "No news to analyze."})
+        result = analyze_news_articles(articles)
+        # Return aggregate + top positive/negative headlines (not full article list)
+        top_positive = [
+            a["title"] for a in result["articles"]
+            if a["sentiment"]["label"] == "positive"
+        ][:3]
+        top_negative = [
+            a["title"] for a in result["articles"]
+            if a["sentiment"]["label"] == "negative"
+        ][:3]
+        return json.dumps({
+            "ticker":        ticker,
+            "aggregate":     result["aggregate"],
+            "top_positive":  top_positive,
+            "top_negative":  top_negative,
+        })
+    except Exception as e:
+        return json.dumps({"error": str(e), "ticker": ticker})
+
+
 # ---------------------------------------------------------------------------
 # Agentic loop helpers
 # ---------------------------------------------------------------------------
 
-_SYSTEM_PROMPT = """You are an expert financial analyst with deep knowledge of technical analysis, options markets, and fundamental investing. You have access to real-time market data tools.
+_SYSTEM_PROMPT = """You are an expert financial analyst with deep knowledge of technical analysis, options markets, fundamental investing, and news-driven catalysts. You have access to real-time market data tools.
 
 When analysing a stock:
 1. Always start by fetching current price data.
@@ -325,6 +413,10 @@ When analysing a stock:
 3. Look at options activity for institutional positioning.
 4. Review fundamentals for valuation context.
 5. Check insider activity as a confidence signal.
+6. Fetch recent news to identify catalysts, risks, or events driving the move.
+7. Analyze news sentiment with FinBERT to quantify whether news flow is bullish or bearish — and whether it confirms or contradicts the technical/options signals.
+
+When news sentiment conflicts with technical signals (e.g., bullish chart but bearish news), flag this explicitly as a risk. When they align, treat it as signal confirmation.
 
 Synthesise all data into a clear, well-structured research note. Use specific numbers. Acknowledge uncertainty where it exists. Separate facts from interpretation. Do not give personalised financial advice."""
 
