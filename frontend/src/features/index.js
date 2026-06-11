@@ -107,6 +107,18 @@ export const FEATURES = [
     ],
   },
   {
+    id: 'screener',
+    label: 'Multi-Factor Screener',
+    icon: '🔭',
+    status: 'live',
+    description: 'Unified screener combining technical, smart money, fundamental, and sentiment signals into one composite score.',
+    subOptions: [
+      { id: 'screen',    label: '🔭 Screener',    icon: '🔭', path: '/screener/screen' },
+      { id: 'score',     label: '🎯 Single Score', icon: '🎯', path: '/screener/score' },
+      { id: 'scheduler', label: '⏰ Scheduler',    icon: '⏰', path: '/screener/scheduler' },
+    ],
+  },
+  {
     id: 'sentiment_ai',
     label: 'AI Sentiment',
     icon: '🧬',
